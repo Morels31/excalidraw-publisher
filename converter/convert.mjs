@@ -520,12 +520,6 @@ async function renderDrawing({ relPath, content, mdRel, svgRel, data }) {
     },
   });
 
-  // Ensure responsive SVG scaling to match viewable area width
-  svg.setAttribute('width', '100%');
-  svg.removeAttribute('height');
-  svg.setAttribute('style', 'max-width: 100%; height: auto; display: block;');
-  svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-
   writeAtomic(path.join(DEST_DIR, svgRel), svg.outerHTML);
   writeAtomic(
     path.join(DEST_DIR, mdRel),
