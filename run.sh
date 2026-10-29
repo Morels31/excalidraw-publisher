@@ -5,9 +5,9 @@ SRC="${SRC_DIR:-/vault-input}"
 DEST="${DEST_DIR:-/usr/src/app/content}"
 CONVERTER="/opt/converter/convert.mjs"
 
-# Keep the cache manifest outside the published content tree. It is
-# intentionally ephemeral: losing it only causes a full re-render on restart.
-export STATE_FILE="${STATE_FILE:-/tmp/excalidraw-publisher-state.json}"
+# Cache manifest stored in the content directory so it persists across restarts.
+# Quartz automatically ignores .converter-state.json.
+export STATE_FILE="${STATE_FILE:-$DEST/.converter-state.json}"
 
 echo "[run] Running initial conversion sweep..."
 node "$CONVERTER" --sweep "$SRC" "$DEST"

@@ -3,28 +3,16 @@ services:
     build: .
     container_name: excalidraw-publisher
     restart: unless-stopped
-    stop_grace_period: 20s
     ports:
-      # Published on the VM's interfaces. The VM firewall keeps it private;
-      # HAProxy on the same machine proxies to this port.
       - "8080:8080"
     environment:
       # Set your public domain for canonical links and sitemaps (e.g. notes.example.com)
       - BASE_URL=${BASE_URL:-notes.example.com}
       - SITE_TITLE=${SITE_TITLE:-Appunti}
-      - STATE_FILE=/tmp/excalidraw-publisher-state.json
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    pids_limit: 256
-    mem_limit: 1g
-    cpus: 2.0
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
     volumes:
       # Mount the folder you want to publish (read-only).
       # WARNING: Keep the destination path relative to your vault root

@@ -115,8 +115,7 @@ const DEST_DIR = path.resolve(
   positionalArgs[1] || process.env.DEST_DIR || '/usr/src/app/content',
 );
 const STATE_FILE = path.resolve(
-  process.env.STATE_FILE ||
-    path.join(os.tmpdir(), 'excalidraw-publisher-state.json'),
+  process.env.STATE_FILE || path.join(DEST_DIR, '.converter-state.json'),
 );
 const SITE_TITLE = process.env.SITE_TITLE || 'Appunti Universitari';
 
