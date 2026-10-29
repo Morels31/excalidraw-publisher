@@ -6,9 +6,9 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Set your public domain for canonical links and sitemaps (e.g. notes.example.com)
-      - BASE_URL=${BASE_URL:-notes.example.com}
-      - SITE_TITLE=${SITE_TITLE:-Appunti}
+      # Set your public domain for canonical links and sitemaps
+      - BASE_URL=notes.example.com
+      - SITE_TITLE=Appunti
     security_opt:
       - no-new-privileges:true
     cap_drop:
