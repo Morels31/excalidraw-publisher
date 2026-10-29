@@ -1,0 +1,26 @@
+services:
+  quartz:
+    build: .
+    container_name: excalidraw-publisher
+    restart: unless-stopped
+    ports:
+      # Access your site at http://<server-ip>:8080
+      - "8080:8080"
+    environment:
+      # Set your public domain for canonical links and sitemaps (e.g. notes.yourdomain.com)
+      - BASE_URL=localhost
+    # Defense-in-depth security hardening
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      # Mount the folder you want to publish (read-only)
+      # WARNING: Keep the destination path relative to your vault root (e.g. /vault-input/<folder-name>)
+      - /path/to/vault/notes:/vault-input/notes:ro
+
+      # Quartz configuration
+      - ./quartz.config.ts:/usr/src/app/quartz.config.ts:ro
+
+      # Persistent host bind mount for cached SVGs and Quartz content
+      - ./quartz-content:/usr/src/app/content
