@@ -4,6 +4,10 @@ Headless publishing pipeline for Obsidian notes and Excalidraw drawings using [Q
 
 It automatically renders Excalidraw drawings into vector SVGs, syncs markdown notes, and serves a live static website.
 
+## Warning
+
+SLOP
+
 ## Setup
 
 1. **Configure `docker-compose.yaml`**:
