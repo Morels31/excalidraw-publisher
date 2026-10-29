@@ -9,6 +9,32 @@ CONVERTER="/opt/converter/convert.mjs"
 # Quartz automatically ignores .converter-state.json.
 export STATE_FILE="${STATE_FILE:-$DEST/.converter-state.json}"
 
+# Check permissions of the quartz-content directory
+if ! touch "$DEST/.perm_check" 2>/dev/null; then
+  echo "" >&2
+  echo "========================================================================" >&2
+  echo "[ERROR] Cannot write to '$DEST' (quartz-content)!" >&2
+  echo "The container runs as an unprivileged user (UID 10001)." >&2
+  echo "Please set the correct ownership on your host by running:" >&2
+  echo "" >&2
+  echo "    sudo chown -R 10001:10001 ./quartz-content" >&2
+  echo "========================================================================" >&2
+  echo "" >&2
+  exit 1
+fi
+rm -f "$DEST/.perm_check"
+
+# Check that the source vault is readable
+if [ ! -d "$SRC" ] || [ ! -r "$SRC" ]; then
+  echo "" >&2
+  echo "========================================================================" >&2
+  echo "[ERROR] Cannot read source directory '$SRC'!" >&2
+  echo "Please verify the vault volume mount in docker-compose.yaml." >&2
+  echo "========================================================================" >&2
+  echo "" >&2
+  exit 1
+fi
+
 echo "[run] Running initial conversion sweep..."
 node "$CONVERTER" --sweep "$SRC" "$DEST"
 

@@ -41,11 +41,7 @@ RUN groupadd --gid 10001 app \
         /usr/src/app/public \
         /usr/src/app/.quartz-cache \
         /usr/src/app/quartz/.quartz-cache \
-    && chown app:app \
-        /usr/src/app/content \
-        /usr/src/app/public \
-        /usr/src/app/.quartz-cache \
-        /usr/src/app/quartz/.quartz-cache
+    && chown -R app:app /usr/src/app
 
 ENV HOME=/tmp \
     NODE_ENV=production
