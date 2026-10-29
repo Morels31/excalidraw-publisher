@@ -1,0 +1,10 @@
+.git
+.gitignore
+.dockerignore
+.env
+node_modules
+converter/node_modules
+converter/tests
+quartz-content
+public
+*.log

@@ -1,0 +1,6 @@
+node_modules/
+converter/node_modules/
+quartz-content/
+public/
+.env
+*.log
