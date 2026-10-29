@@ -23,6 +23,7 @@ WORKDIR /usr/src/app
 
 # Quartz 5 reads quartz.config.yaml; quartz.ts injects BASE_URL at runtime.
 COPY quartz.config.yaml quartz.ts ./
+COPY custom.scss /usr/src/app/quartz/styles/custom.scss
 COPY run.sh ./run.sh
 RUN chmod +x /usr/src/app/run.sh
 
