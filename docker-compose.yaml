@@ -1,6 +1,6 @@
 services:
-  # Converts the vault and renders the site into ./public. It has no network
-  # access at all: nothing is served from this container.
+  # Converts the vault and renders the site into ./public/site. It has no
+  # network access at all: nothing is served from this container.
   quartz:
     build: .
     container_name: excalidraw-publisher
@@ -26,7 +26,8 @@ services:
       # Create it with: mkdir -p quartz-content && sudo chown -R 10001:10001 quartz-content
       - ./quartz-content:/usr/src/app/content
 
-      # Rendered site, published read-only by the web container.
+      # Rendered site, published read-only by the web container. Quartz builds
+      # into ./public/site because it wipes the output dir on every build.
       # Create it with: mkdir -p public && sudo chown -R 10001:10001 public
       - ./public:/usr/src/app/public
 

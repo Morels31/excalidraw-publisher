@@ -49,7 +49,7 @@ USER app
 # The container serves nothing itself; the site is ready once the first build
 # has produced an index. The nginx container waits for this to pass.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
-    CMD test -s /usr/src/app/public/index.html || exit 1
+    CMD test -s /usr/src/app/public/site/index.html || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["/usr/src/app/run.sh"]

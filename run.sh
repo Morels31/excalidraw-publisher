@@ -25,6 +25,8 @@ fi
 rm -f "$DEST/.perm_check"
 
 # The rendered site is a host bind mount too, shared with the web container.
+# Quartz wipes its output directory on every build, and a bind mountpoint cannot
+# be removed (EBUSY), so build into a subdirectory of the mount instead.
 PUBLIC="${PUBLIC_DIR:-/usr/src/app/public}"
 if ! touch "$PUBLIC/.perm_check" 2>/dev/null; then
   echo "" >&2
@@ -76,9 +78,9 @@ cleanup() {
 trap cleanup TERM INT EXIT
 
 # Start Quartz only after the synchronous sweep has populated content/.
-# Watch mode rebuilds public/ on changes; it never opens a port, the nginx
+# Watch mode rebuilds public/site on changes; it never opens a port, the nginx
 # container serves the output. Invoke the bundled CLI directly instead of
 # `npx` so the container never touches npm's resolution/cache paths.
-node /usr/src/app/quartz/bootstrap-cli.mjs build --watch --concurrency=4 &
+node /usr/src/app/quartz/bootstrap-cli.mjs build --watch --concurrency=4 --output "$PUBLIC/site" &
 QUARTZ_PID=$!
 wait "$QUARTZ_PID"
