@@ -4,9 +4,9 @@ Headless publishing pipeline for Obsidian notes and Excalidraw drawings using [Q
 
 It automatically renders Excalidraw drawings into vector SVGs, syncs markdown notes, and serves a live static website.
 
-## Warning
+## Important Warning
 
-SLOP
+I really do not like to **SLOP** code, but i needed this, and honestly i usually care about code quality, this time i do not. Soo it's half **SLOPPED**.
 
 ## Setup
 
