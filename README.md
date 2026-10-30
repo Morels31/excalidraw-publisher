@@ -37,10 +37,10 @@ The site is served at `http://<server-ip>:8080`, ready to be placed behind HAPro
 
 ## How it works
 
-- **Excalidraw to SVG**: Detects drawings (both raw and compressed JSON) and renders them into responsive, self-contained SVGs with embedded fonts.
+- **Excalidraw to SVG**: Detects drawings (both raw and compressed JSON) and renders them into self-contained SVGs with embedded fonts.
 - **Real-time watcher & cache**: Detects additions, changes, and deletions instantly, caching unchanged notes via SHA-256 hashes.
-- **Clean publishing**: Only syncs notes and web assets (`.md`, `.svg`, `.pdf`, `.png`, `.jpg`, `.webp`), automatically ignoring dotfiles, `.obsidian/`, and private directories (`private/`, `templates/`).
-- **Hardened container**: Runs under an unprivileged user (`10001:10001`) with dropped capabilities, resource limits, and healthcheck.
+- **Clean publishing**: Only syncs notes and web assets (`.md`, `.svg`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), automatically ignoring dotfiles, `.obsidian/`, and private directories (`private/`, `templates/`).
+- **Hardened container**: Runs under an unprivileged user (`10001:10001`) with dropped capabilities and a healthcheck.
 
 ## Reset cache
 

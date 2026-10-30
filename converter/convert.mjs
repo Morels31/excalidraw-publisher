@@ -117,7 +117,7 @@ const DEST_DIR = path.resolve(
 const STATE_FILE = path.resolve(
   process.env.STATE_FILE || path.join(DEST_DIR, '.converter-state.json'),
 );
-const SITE_TITLE = process.env.SITE_TITLE || 'Appunti Universitari';
+const SITE_TITLE = process.env.SITE_TITLE || 'Appunti Uni';
 
 const ALLOWED_ASSET_EXTS = new Set([
   '.pdf',
@@ -489,13 +489,15 @@ function buildCompanionMarkdown(relPath, content) {
         .join('\n')}`
     : '';
 
+  const altText = baseName.replace(/[[\]]/g, '');
+
   return `---
 title: ${JSON.stringify(baseName)}
 ---
 
 # ${baseName}
 
-![[${svgFileName}]]${textBlock}${linksBlock}
+![${altText}](<${svgFileName}>)${textBlock}${linksBlock}
 `;
 }
 

@@ -61,7 +61,7 @@ trap cleanup TERM INT EXIT
 
 # Start Quartz only after the synchronous sweep has populated content/.
 # Invoke the bundled CLI directly instead of `npx` so the container never
-# touches npm's resolution/cache paths (the root filesystem is read-only).
+# touches npm's resolution/cache paths.
 node /usr/src/app/quartz/bootstrap-cli.mjs build --serve --port=8080 --concurrency=4 &
 QUARTZ_PID=$!
 wait "$QUARTZ_PID"

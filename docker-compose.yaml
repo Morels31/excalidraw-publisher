@@ -9,7 +9,7 @@ services:
     environment:
       # Set your public domain for canonical links and sitemaps
       - BASE_URL=notes.example.com
-      - SITE_TITLE=Appunti
+      - SITE_TITLE=Appunti Uni
     security_opt:
       - no-new-privileges:true
     cap_drop:
