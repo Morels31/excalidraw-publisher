@@ -26,8 +26,7 @@ services:
       # Create it with: mkdir -p quartz-content && sudo chown -R 10001:10001 quartz-content
       - ./quartz-content:/usr/src/app/content
 
-      # Rendered site, published read-only by the web container. Quartz builds
-      # into ./public/site because it wipes the output dir on every build.
+      # Rendered site, published read-only by the web container.
       # Create it with: mkdir -p public && sudo chown -R 10001:10001 public
       - ./public:/usr/src/app/public
 
