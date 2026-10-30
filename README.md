@@ -10,22 +10,19 @@ SLOP
 
 ## Setup
 
-1. **Configure `docker-compose.yaml`**:
-   - Set your domain in `BASE_URL` (e.g. `notes.example.com`).
-   - Set your vault path under `volumes`:
-     ```yaml
-     volumes:
-       - /path/to/vault/<folder-name>:/vault-input/<folder-name>:ro
-       - ./quartz-content:/usr/src/app/content
-     ```
+1. **Configure the environment**:
+   ```bash
+   cp .env.example .env
+   ```
+   Then edit `.env` and set `VAULT_PATH`, `VAULT_SUBDIR`, and `BASE_URL`. Use `cp`, not `mv`: `.env.example` is tracked by git and moving it would stage a deletion.
 
    > [!IMPORTANT]
-   > Keep the destination path relative to your vault root (e.g. `/vault-input/<folder-name>`). For example, if you publish a subfolder called `Notes`, mount it as `/vault-input/Notes` so wikilinks like `[[Notes/...]]` resolve correctly without broken links.
+   > Keep the published folder relative to your vault root (e.g. `/vault-input/<folder-name>`). For example, if you publish a subfolder called `Notes`, mount it as `/vault-input/Notes` so wikilinks like `[[Notes/...]]` resolve correctly without broken links.
 
-2. **Create the content directory**:
+2. **Create the content directories**:
    ```bash
-   mkdir -p quartz-content
-   sudo chown -R 10001:10001 quartz-content
+   mkdir -p quartz-content public
+   sudo chown -R 10001:10001 quartz-content public
    ```
 
 3. **Start the service**:
@@ -33,14 +30,14 @@ SLOP
    docker compose up -d --build
    ```
 
-The site is served at `http://<server-ip>:8080`, ready to be placed behind HAProxy or your reverse proxy.
+The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`), ready to be placed behind HAProxy or your reverse proxy.
 
 ## How it works
 
 - **Excalidraw to SVG**: Detects drawings (both raw and compressed JSON) and renders them into self-contained SVGs with embedded fonts.
 - **Real-time watcher & cache**: Detects additions, changes, and deletions instantly, caching unchanged notes via SHA-256 hashes.
 - **Clean publishing**: Only syncs notes and web assets (`.md`, `.svg`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), automatically ignoring dotfiles, `.obsidian/`, and private directories (`private/`, `templates/`).
-- **Hardened container**: Runs under an unprivileged user (`10001:10001`) with dropped capabilities and a healthcheck.
+- **Hardened containers**: The publisher runs as `10001:10001` with dropped capabilities and **no network access**; a separate nginx container serves the rendered `./public` directory on port 8080 as the same user.
 
 ## Reset cache
 
@@ -48,8 +45,8 @@ To force a full rebuild from scratch:
 
 ```bash
 docker compose down
-rm -rf ./quartz-content
-mkdir -p quartz-content
-sudo chown -R 10001:10001 quartz-content
+rm -rf ./quartz-content ./public
+mkdir -p quartz-content public
+sudo chown -R 10001:10001 quartz-content public
 docker compose up -d
 ```

@@ -1,13 +1,11 @@
-# Pinned Quartz 5.0.0 image (ghcr.io/jackyzha0/quartz:latest resolved 2026-10-29).
-# The registry only publishes the `latest` tag, so pin the digest instead.
-FROM ghcr.io/jackyzha0/quartz@sha256:2e3bdef1c5daf3b46966c61704f294ca0398a4099fa7cfd2e793580198eb21f9
+# Quartz 5 base image. The registry publishes `latest` only; rebuild to update.
+FROM ghcr.io/jackyzha0/quartz:latest
 
 USER root
 
-# tini reaps children and forwards signals to the whole process group; curl is
-# used by the healthcheck.
+# tini reaps children and forwards signals to the whole process group.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini curl \
+    && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/*
 
 # The converter has its own locked dependency tree so it cannot disturb the
@@ -48,8 +46,10 @@ ENV HOME=/tmp \
 
 USER app
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/ >/dev/null || exit 1
+# The container serves nothing itself; the site is ready once the first build
+# has produced an index. The nginx container waits for this to pass.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD test -s /usr/src/app/public/index.html || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["/usr/src/app/run.sh"]

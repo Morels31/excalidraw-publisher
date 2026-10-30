@@ -24,6 +24,22 @@ if ! touch "$DEST/.perm_check" 2>/dev/null; then
 fi
 rm -f "$DEST/.perm_check"
 
+# The rendered site is a host bind mount too, shared with the web container.
+PUBLIC="${PUBLIC_DIR:-/usr/src/app/public}"
+if ! touch "$PUBLIC/.perm_check" 2>/dev/null; then
+  echo "" >&2
+  echo "========================================================================" >&2
+  echo "[ERROR] Cannot write to '$PUBLIC' (public)!" >&2
+  echo "The container runs as an unprivileged user (UID 10001)." >&2
+  echo "Please set the correct ownership on your host by running:" >&2
+  echo "" >&2
+  echo "    sudo chown -R 10001:10001 ./public" >&2
+  echo "========================================================================" >&2
+  echo "" >&2
+  exit 1
+fi
+rm -f "$PUBLIC/.perm_check"
+
 # Check that the source vault is readable
 if [ ! -d "$SRC" ] || [ ! -r "$SRC" ]; then
   echo "" >&2
@@ -60,8 +76,9 @@ cleanup() {
 trap cleanup TERM INT EXIT
 
 # Start Quartz only after the synchronous sweep has populated content/.
-# Invoke the bundled CLI directly instead of `npx` so the container never
-# touches npm's resolution/cache paths.
-node /usr/src/app/quartz/bootstrap-cli.mjs build --serve --port=8080 --concurrency=4 &
+# Watch mode rebuilds public/ on changes; it never opens a port, the nginx
+# container serves the output. Invoke the bundled CLI directly instead of
+# `npx` so the container never touches npm's resolution/cache paths.
+node /usr/src/app/quartz/bootstrap-cli.mjs build --watch --concurrency=4 &
 QUARTZ_PID=$!
 wait "$QUARTZ_PID"
