@@ -14,7 +14,7 @@ SLOP
    ```bash
    cp .env.example .env
    ```
-   Then edit `.env` and set `VAULT_PATH`, `VAULT_SUBDIR`, and `BASE_URL`. Use `cp`, not `mv`: `.env.example` is tracked by git and moving it would stage a deletion.
+   Then edit `.env` and set `VAULT_PATH`, `VAULT_SUBDIR`, and `BASE_URL`.
 
    > [!IMPORTANT]
    > Keep the published folder relative to your vault root (e.g. `/vault-input/<folder-name>`). For example, if you publish a subfolder called `Notes`, mount it as `/vault-input/Notes` so wikilinks like `[[Notes/...]]` resolve correctly without broken links.
