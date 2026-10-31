@@ -12,6 +12,8 @@
  *
  * Environment:
  *   SRC_DIR, DEST_DIR, STATE_FILE, SITE_TITLE
+ *   STARTUP_HASH_CHECK  Set to 1 to hash every file at startup instead of
+ *                       trusting size/mtime (slow; verification only).
  */
 
 import fs from 'node:fs';
@@ -20,6 +22,9 @@ import crypto from 'node:crypto';
 import LZString from 'lz-string';
 
 const CONVERTER_VERSION = '2.0.0';
+// Bumped when the note parser changes what it detects, so cached entries from
+// an older parser are re-read once instead of being trusted.
+const PARSER_VERSION = 2;
 const LOG_PREFIX = '[Converter]';
 
 // ---------------------------------------------------------------------------
@@ -121,7 +126,9 @@ async function getRenderer() {
 
 const rawArgs = process.argv.slice(2);
 let isWatch = false;
-let isForce = false;
+// Only the literal "1" enables it, so `STARTUP_HASH_CHECK=false` in .env stays
+// off instead of becoming a truthy string.
+let isForce = (process.env.STARTUP_HASH_CHECK || '').trim() === '1';
 const positionalArgs = [];
 
 for (const arg of rawArgs) {
@@ -473,6 +480,10 @@ function withSignature(entry, sig) {
   return sig ? { ...entry, size: sig.size, mtimeMs: sig.mtimeMs } : entry;
 }
 
+function withParser(entry) {
+  return { ...entry, parser: PARSER_VERSION };
+}
+
 // ---------------------------------------------------------------------------
 // Excalidraw note parsing
 // ---------------------------------------------------------------------------
@@ -495,7 +506,9 @@ function parseDrawing(content) {
 
     if (language === 'compressed-json') {
       try {
-        jsonText = LZString.decompressFromBase64(jsonText);
+        // Some editors wrap the base64 payload across lines; the decoder
+        // rejects any whitespace, so drop it before decompressing.
+        jsonText = LZString.decompressFromBase64(jsonText.replace(/\s+/g, ''));
       } catch {
         continue;
       }
@@ -535,6 +548,60 @@ function cleanExtractedText(text) {
     .join('\n\n');
 }
 
+const IMAGE_MIME_TYPES = new Map([
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.gif', 'image/gif'],
+  ['.webp', 'image/webp'],
+  ['.svg', 'image/svg+xml'],
+]);
+
+/**
+ * Excalidraw notes keep image data outside the drawing JSON: the
+ * `## Embedded Files` section maps each element's `fileId` to a vault path.
+ * Inline the ones that exist as data URLs, because an SVG displayed through
+ * an `<img>` tag cannot load external files. Missing images are left out and
+ * render empty, exactly as they do in Obsidian.
+ */
+function resolveEmbeddedFiles(data, relPath, content) {
+  const files = { ...(data.files || {}) };
+  const section = extractSection(content, 'Embedded Files');
+  const noteDir = path.dirname(path.join(SRC_DIR, relPath));
+
+  if (!section) return files;
+
+  for (const line of section.split(/\r?\n/)) {
+    const match = /^([0-9a-f]{40}):\s*\[\[([^\]|]+)/i.exec(line.trim());
+    if (!match) continue;
+
+    const id = match[1];
+    const target = match[2].split('#')[0].trim();
+    if (!target) continue;
+
+    const rel = path.relative(SRC_DIR, path.resolve(noteDir, target));
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;
+    if (isExcludedRel(rel)) continue;
+
+    const source = findSourcePath(rel);
+    if (!source) continue;
+
+    const mimeType = IMAGE_MIME_TYPES.get(path.extname(source).toLowerCase());
+    if (!mimeType) continue;
+
+    try {
+      files[id] = {
+        id,
+        mimeType,
+        dataURL: `data:${mimeType};base64,${fs.readFileSync(source).toString('base64')}`,
+        created: Date.now(),
+      };
+    } catch {}
+  }
+
+  return files;
+}
+
 function buildCompanionMarkdown(relPath, content) {
   const ext = path.extname(relPath);
   const baseName = path.basename(relPath, ext);
@@ -564,7 +631,7 @@ title: ${JSON.stringify(baseName)}
 `;
 }
 
-async function renderDrawing({ relPath, content, mdRel, svgRel, data }) {
+async function renderDrawing({ relPath, content, mdRel, svgRel, data, files }) {
   const { exportScene, renderEnvironment } = await getRenderer();
   const appState = data.appState || {};
   const exportBackground = appState.exportBackground !== false;
@@ -574,7 +641,7 @@ async function renderDrawing({ relPath, content, mdRel, svgRel, data }) {
     data: {
       elements: data.elements,
       appState,
-      files: data.files || {},
+      files,
     },
     config: {
       padding: 15,
@@ -664,7 +731,7 @@ function assertSourceReady(files, errors) {
   }
 }
 
-async function convertOne(srcFile) {
+async function convertOne(srcFile, force = false) {
   const relPath = path.relative(SRC_DIR, srcFile);
   if (!relPath || relPath === '' || relPath.startsWith('..') || path.isAbsolute(relPath)) {
     return 'skipped';
@@ -697,7 +764,8 @@ async function convertOne(srcFile) {
         sameOutputs(previous.outputs, [mdRel]));
 
     if (
-      !isForce &&
+      !force &&
+      previous?.parser === PARSER_VERSION &&
       signatureUnchanged(previous, sig) &&
       knownOutputs &&
       outputsIntact(previous)
@@ -714,16 +782,24 @@ async function convertOne(srcFile) {
     }
 
     const hash = sha256String(content);
-    // The mtime moved but the bytes did not (touch, rsync -t): refresh the
-    // signature and keep the existing output.
-    if (knownOutputs && previous.hash === hash && outputsIntact(previous)) {
-      state.files[key] = withSignature(previous, sig);
+    // Parse once; the drawing (if any) replaces the raw note with a rendered
+    // companion page.
+    const drawing = parseDrawing(content);
+    const parsedOutputs = drawing ? [mdRel, svgRel] : [mdRel];
+
+    // Same bytes and same classification (touch, rsync -t, or an older parser
+    // version): keep the existing output and just refresh the signature. The
+    // embedded images cannot have changed if the note itself did not.
+    if (
+      previous &&
+      previous.hash === hash &&
+      sameOutputs(previous.outputs, parsedOutputs) &&
+      outputsIntact(previous)
+    ) {
+      state.files[key] = withSignature(withParser(previous), sig);
       markStateDirty();
       return 'cached';
     }
-
-    const drawing = parseDrawing(content);
-    const expectedOutputs = drawing ? [mdRel, svgRel] : [mdRel];
 
     if (drawing) {
       try {
@@ -733,9 +809,10 @@ async function convertOne(srcFile) {
           mdRel,
           svgRel,
           data: drawing,
+          files: resolveEmbeddedFiles(drawing, relPath, content),
         });
         state.files[key] = withSignature(
-          { hash, kind: 'drawing', outputs: expectedOutputs },
+          withParser({ hash, kind: 'drawing', outputs: parsedOutputs }),
           sig,
         );
         markStateDirty();
@@ -749,7 +826,7 @@ async function convertOne(srcFile) {
           safeUnlink(path.join(DEST_DIR, svgRel));
         }
         state.files[key] = withSignature(
-          { hash, kind: 'markdown', outputs: [mdRel] },
+          { hash, kind: 'markdown', outputs: [mdRel], parser: PARSER_VERSION },
           sig,
         );
         markStateDirty();
@@ -765,7 +842,7 @@ async function convertOne(srcFile) {
       safeUnlink(path.join(DEST_DIR, svgRel));
     }
     state.files[key] = withSignature(
-      { hash, kind: 'markdown', outputs: [mdRel] },
+      { hash, kind: 'markdown', outputs: [mdRel], parser: PARSER_VERSION },
       sig,
     );
     markStateDirty();
@@ -792,7 +869,7 @@ async function convertOne(srcFile) {
     const previous = state.files[key];
     const sig = fileSignature(srcFile);
     if (
-      !isForce &&
+      !force &&
       signatureUnchanged(previous, sig) &&
       sameOutputs(previous.outputs, [relPath]) &&
       allOutputsExist([relPath])
@@ -979,7 +1056,7 @@ ${links}
   writeAtomic(indexFile, content);
 }
 
-async function runSweep() {
+async function runSweep(force = false) {
   const { files, errors } = walkDirectory(SRC_DIR);
   assertSourceReady(files, errors);
 
@@ -999,7 +1076,7 @@ async function runSweep() {
 
   for (const file of files) {
     try {
-      const result = await convertOne(file);
+      const result = await convertOne(file, force);
       if (result === 'converted') converted += 1;
       else if (result === 'cached') cached += 1;
       else skipped += 1;
@@ -1105,6 +1182,8 @@ async function startWatcher() {
   watcher.on('ready', async () => {
     // ignoreInitial also swallows files created between the sweep above and
     // chokidar's baseline scan; sweep once more now that the baseline exists.
+    // No forced hashing here: anything created in that gap has a fresh
+    // signature anyway.
     try {
       await runSweep();
     } catch (err) {
@@ -1167,7 +1246,7 @@ async function main() {
   log(`Source: "${SRC_DIR}" -> Destination: "${DEST_DIR}"`);
   log(`State: "${STATE_FILE}"`);
 
-  await runSweep();
+  await runSweep(isForce);
 
   if (isWatch) {
     await startWatcher();

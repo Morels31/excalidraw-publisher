@@ -11,6 +11,7 @@ services:
       # Set your public domain for canonical links and sitemaps
       - BASE_URL=${BASE_URL:-notes.example.com}
       - SITE_TITLE=${SITE_TITLE:-Appunti Uni}
+      - STARTUP_HASH_CHECK=${STARTUP_HASH_CHECK:-0}
     security_opt:
       - no-new-privileges:true
     cap_drop:
