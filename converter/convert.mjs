@@ -318,16 +318,18 @@ function cleanEmptyDirectories(dir) {
  */
 function walkDirectory(root) {
   const files = [];
+  const dirs = [];
   const errors = [];
 
   let rootReal;
   try {
     rootReal = fs.realpathSync(root);
   } catch (err) {
-    return { files, errors: [`${root}: ${err.message}`] };
+    return { files, dirs, errors: [`${root}: ${err.message}`] };
   }
 
   const visit = (dir) => {
+    dirs.push(dir);
     let entries;
     try {
       entries = fs.readdirSync(dir);
@@ -377,7 +379,7 @@ function walkDirectory(root) {
   };
 
   visit(root);
-  return { files, errors };
+  return { files, dirs, errors };
 }
 
 function isSafeSourceFile(file) {
@@ -803,6 +805,35 @@ function assertSourceReady(files, errors) {
   }
 }
 
+/**
+ * The published site lowercases every path, so two names that differ only by
+ * case would silently overwrite each other. Refuse to guess which one wins.
+ */
+function assertNoCaseCollisions(files, dirs) {
+  const byKey = new Map();
+  const add = (relPath) => {
+    const key = toKey(relPath);
+    const list = byKey.get(key);
+    if (list) list.push(relPath);
+    else byKey.set(key, [relPath]);
+  };
+
+  for (const file of files) add(path.relative(SRC_DIR, file));
+  for (const dir of dirs) {
+    const rel = path.relative(SRC_DIR, dir);
+    if (rel) add(rel);
+  }
+
+  const clashes = [...byKey.values()].filter((list) => list.length > 1);
+  if (clashes.length === 0) return;
+
+  throw new Error(
+    `Refusing to convert: ${clashes.length} name(s) differ only by case:\n` +
+      clashes.map((list) => `  ${list.join(' / ')}`).join('\n') +
+      '\nRename or delete one; both cannot be published.',
+  );
+}
+
 async function convertOne(srcFile, force = false) {
   const relPath = path.relative(SRC_DIR, srcFile);
   if (!relPath || relPath === '' || relPath.startsWith('..') || path.isAbsolute(relPath)) {
@@ -981,6 +1012,19 @@ async function unpublish(relPath) {
   const ext = path.extname(relPath).toLowerCase();
 
   if (entry?.outputs?.length) {
+    // With a shared (case-insensitive) key, make sure this entry describes
+    // the file being removed before deleting anything.
+    const owned = entry.outputs.some(
+      (output) => output === relPath || output === normalizeMdRel(relPath),
+    );
+    if (!owned) {
+      console.error(
+        `${LOG_PREFIX} Refusing to unpublish ${relPath}: state belongs to ` +
+          `${entry.outputs[0]} (names differ only by case).`,
+      );
+      return;
+    }
+
     for (const output of entry.outputs) {
       if (
         ext === '.md' &&
@@ -1128,8 +1172,9 @@ ${links}
 }
 
 async function runSweep(force = false) {
-  const { files, errors } = walkDirectory(SRC_DIR);
+  const { files, dirs, errors } = walkDirectory(SRC_DIR);
   assertSourceReady(files, errors);
+  assertNoCaseCollisions(files, dirs);
 
   pruneOrphans(files);
 
@@ -1195,6 +1240,25 @@ function enqueue(key, task) {
   return next;
 }
 
+/**
+ * Return a sibling whose name differs from this file only by case, if any.
+ * Such a pair cannot both be published, so the new file is refused instead of
+ * silently replacing the existing one until the next sweep.
+ */
+function caseTwin(relPath) {
+  const dir = path.dirname(path.join(SRC_DIR, relPath));
+  const name = path.basename(relPath);
+  const lowered = name.toLowerCase();
+  try {
+    for (const entry of fs.readdirSync(dir)) {
+      if (entry !== name && entry.toLowerCase() === lowered) {
+        return path.join(path.dirname(relPath), entry);
+      }
+    }
+  } catch {}
+  return null;
+}
+
 async function startWatcher() {
   const { watch } = await import('chokidar');
 
@@ -1223,6 +1287,16 @@ async function startWatcher() {
     const relPath = path.relative(SRC_DIR, filePath);
     enqueue(toKey(relPath), async () => {
       await reconcile;
+      if (event === 'add') {
+        const twin = caseTwin(relPath);
+        if (twin) {
+          console.error(
+            `${LOG_PREFIX} Refusing to convert ${relPath}: name differs ` +
+              `only by case from ${twin}. Rename or delete one.`,
+          );
+          return;
+        }
+      }
       log(`[${event}] ${relPath}`);
       if (event === 'unlink') {
         await unpublish(relPath);
