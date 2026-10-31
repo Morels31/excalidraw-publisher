@@ -22,10 +22,9 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import LZString from 'lz-string';
 
-const CONVERTER_VERSION = '2.0.0';
-// Bumped when the note parser changes what it detects, so cached entries from
-// an older parser are re-read once instead of being trusted.
-const PARSER_VERSION = 2;
+// Bumped whenever converted output changes: loadState() drops the whole
+// manifest on a mismatch, which forces a full rebuild.
+const CONVERTER_VERSION = '2.1.0';
 const LOG_PREFIX = '[Converter]';
 
 // ---------------------------------------------------------------------------
@@ -482,10 +481,6 @@ function withSignature(entry, sig) {
   return sig ? { ...entry, size: sig.size, mtimeMs: sig.mtimeMs } : entry;
 }
 
-function withParser(entry) {
-  return { ...entry, parser: PARSER_VERSION };
-}
-
 // ---------------------------------------------------------------------------
 // Excalidraw note parsing
 // ---------------------------------------------------------------------------
@@ -572,7 +567,7 @@ const PDF_RENDER_QUALITY = 80;
 function renderPdfPage(pdfFile, page) {
   const cacheKey = `${crypto
     .createHash('sha1')
-    .update(`${pdfFile}:${page}:${PDF_RENDER_DPI}`)
+    .update(`${pdfFile}:${page}:${PDF_RENDER_DPI}:${PDF_RENDER_QUALITY}`)
     .digest('hex')}.jpg`;
   const cacheFile = path.join(PDF_CACHE_DIR, cacheKey);
 
@@ -842,7 +837,6 @@ async function convertOne(srcFile, force = false) {
 
     if (
       !force &&
-      previous?.parser === PARSER_VERSION &&
       signatureUnchanged(previous, sig) &&
       knownOutputs &&
       outputsIntact(previous)
@@ -864,16 +858,16 @@ async function convertOne(srcFile, force = false) {
     const drawing = parseDrawing(content);
     const parsedOutputs = drawing ? [mdRel, svgRel] : [mdRel];
 
-    // Same bytes and same classification (touch, rsync -t, or an older parser
-    // version): keep the existing output and just refresh the signature. The
-    // embedded images cannot have changed if the note itself did not.
+    // Same bytes and same classification (touch, rsync -t): keep the existing
+    // output and just refresh the signature. The embedded images cannot have
+    // changed if the note itself did not.
     if (
       previous &&
       previous.hash === hash &&
       sameOutputs(previous.outputs, parsedOutputs) &&
       outputsIntact(previous)
     ) {
-      state.files[key] = withSignature(withParser(previous), sig);
+      state.files[key] = withSignature(previous, sig);
       markStateDirty();
       return 'cached';
     }
@@ -889,7 +883,7 @@ async function convertOne(srcFile, force = false) {
           files: resolveEmbeddedFiles(drawing, relPath, content),
         });
         state.files[key] = withSignature(
-          withParser({ hash, kind: 'drawing', outputs: parsedOutputs }),
+          { hash, kind: 'drawing', outputs: parsedOutputs },
           sig,
         );
         markStateDirty();
@@ -903,7 +897,7 @@ async function convertOne(srcFile, force = false) {
           safeUnlink(path.join(DEST_DIR, svgRel));
         }
         state.files[key] = withSignature(
-          { hash, kind: 'markdown', outputs: [mdRel], parser: PARSER_VERSION },
+          { hash, kind: 'markdown', outputs: [mdRel] },
           sig,
         );
         markStateDirty();
@@ -919,7 +913,7 @@ async function convertOne(srcFile, force = false) {
       safeUnlink(path.join(DEST_DIR, svgRel));
     }
     state.files[key] = withSignature(
-      { hash, kind: 'markdown', outputs: [mdRel], parser: PARSER_VERSION },
+      { hash, kind: 'markdown', outputs: [mdRel] },
       sig,
     );
     markStateDirty();
