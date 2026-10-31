@@ -34,7 +34,7 @@ The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`), ready t
 
 ## How it works
 
-- **Excalidraw to SVG**: Detects drawings (both raw and compressed JSON) and renders them into self-contained SVGs with embedded fonts.
+- **Excalidraw to SVG**: Detects drawings (both raw and compressed JSON) and renders them into self-contained SVGs with embedded fonts, images, and rasterized PDF pages.
 - **Real-time watcher & cache**: Detects additions, changes, and deletions instantly, caching unchanged notes via size/mtime, with SHA-256 as a fallback.
 - **Clean publishing**: Only syncs notes and web assets (`.md`, `.svg`, `.pdf`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), automatically ignoring dotfiles, `.obsidian/`, and private directories (`private/`, `templates/`).
 - **Hardened containers**: The publisher runs as `10001:10001` with dropped capabilities and **no network access**; a separate nginx container serves the rendered site on port 8080 as the same user.

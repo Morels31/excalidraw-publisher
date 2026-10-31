@@ -23,6 +23,8 @@ configuration:
     - "**/.git"
     - "**/.converter-state.json"
     - "**/.converter-state.json.*"
+    - "**/.pdf-cache"
+    - "**/.pdf-cache/**"
   theme:
     fontOrigin: googleFonts
     cdnCaching: true

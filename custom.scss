@@ -1,0 +1,20 @@
+// Drop the right sidebar and give the note column the space it reserved.
+// Quartz always allocates 320px for it, even when no plugin renders there, and
+// caps the whole page at 1500px.
+@media (min-width: 1200px) {
+  .page {
+    max-width: 1900px;
+  }
+
+  .page > #quartz-body {
+    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-areas:
+      "grid-sidebar-left grid-header"
+      "grid-sidebar-left grid-center"
+      "grid-sidebar-left grid-footer";
+  }
+
+  .page > #quartz-body > .right.sidebar {
+    display: none;
+  }
+}

@@ -4,8 +4,9 @@ FROM ghcr.io/jackyzha0/quartz:latest
 USER root
 
 # tini reaps children and forwards signals to the whole process group.
+# poppler renders embedded PDF pages to images for the converter.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # The converter has its own locked dependency tree so it cannot disturb the
@@ -21,6 +22,7 @@ WORKDIR /usr/src/app
 
 # Quartz 5 reads quartz.config.yaml; quartz.ts injects BASE_URL at runtime.
 COPY quartz.config.yaml quartz.ts ./
+COPY custom.scss /usr/src/app/quartz/styles/custom.scss
 COPY run.sh ./run.sh
 RUN chmod +x /usr/src/app/run.sh
 
@@ -47,8 +49,9 @@ ENV HOME=/tmp \
 USER app
 
 # The container serves nothing itself; the site is ready once the first build
-# has produced an index. The nginx container waits for this to pass.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+# has produced an index. The nginx container waits for this to pass. The long
+# start period covers the first sweep, which may render hundreds of drawings.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=900s --retries=3 \
     CMD test -s /usr/src/app/public/site/index.html || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]

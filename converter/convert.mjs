@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import LZString from 'lz-string';
 
 const CONVERTER_VERSION = '2.0.0';
@@ -154,6 +155,7 @@ const DEST_DIR = path.resolve(
 const STATE_FILE = path.resolve(
   process.env.STATE_FILE || path.join(DEST_DIR, '.converter-state.json'),
 );
+const PDF_CACHE_DIR = path.join(DEST_DIR, '.pdf-cache');
 const SITE_TITLE = process.env.SITE_TITLE || 'Appunti Uni';
 
 const ALLOWED_ASSET_EXTS = new Set([
@@ -557,12 +559,70 @@ const IMAGE_MIME_TYPES = new Map([
   ['.svg', 'image/svg+xml'],
 ]);
 
+// PDF pages imported into a drawing are referenced as `file.pdf#page=N`; they
+// have to be rasterized before they can be inlined.
+const PDF_RENDER_DPI = 150;
+const PDF_RENDER_QUALITY = 80;
+
+/**
+ * Render one PDF page to a cached JPEG and return its bytes. The cache lives
+ * inside the content directory (Quartz ignores dot-directories) so restarts
+ * and note edits do not rasterize the same page again.
+ */
+function renderPdfPage(pdfFile, page) {
+  const cacheKey = `${crypto
+    .createHash('sha1')
+    .update(`${pdfFile}:${page}:${PDF_RENDER_DPI}`)
+    .digest('hex')}.jpg`;
+  const cacheFile = path.join(PDF_CACHE_DIR, cacheKey);
+
+  try {
+    return fs.readFileSync(cacheFile);
+  } catch {}
+
+  const tmpPrefix = path.join(PDF_CACHE_DIR, `.tmp-${process.pid}-${cacheKey}`);
+  try {
+    fs.mkdirSync(PDF_CACHE_DIR, { recursive: true });
+    execFileSync(
+      'pdftoppm',
+      [
+        '-f',
+        String(page),
+        '-l',
+        String(page),
+        '-r',
+        String(PDF_RENDER_DPI),
+        '-jpeg',
+        '-jpegopt',
+        `quality=${PDF_RENDER_QUALITY}`,
+        '-singlefile',
+        pdfFile,
+        tmpPrefix,
+      ],
+      { stdio: 'ignore', timeout: 120000 },
+    );
+    fs.renameSync(`${tmpPrefix}.jpg`, cacheFile);
+    return fs.readFileSync(cacheFile);
+  } catch (err) {
+    try {
+      fs.unlinkSync(`${tmpPrefix}.jpg`);
+    } catch {}
+    console.error(
+      `${LOG_PREFIX} Cannot render page ${page} of ${path.relative(
+        SRC_DIR,
+        pdfFile,
+      )}: ${err.message}`,
+    );
+    return null;
+  }
+}
+
 /**
  * Excalidraw notes keep image data outside the drawing JSON: the
  * `## Embedded Files` section maps each element's `fileId` to a vault path.
  * Inline the ones that exist as data URLs, because an SVG displayed through
- * an `<img>` tag cannot load external files. Missing images are left out and
- * render empty, exactly as they do in Obsidian.
+ * an `<img>` tag cannot load external files. PDF imports are rasterized first.
+ * Missing images are left out and render empty, just like in Obsidian.
  */
 function resolveEmbeddedFiles(data, relPath, content) {
   const files = { ...(data.files || {}) };
@@ -576,7 +636,8 @@ function resolveEmbeddedFiles(data, relPath, content) {
     if (!match) continue;
 
     const id = match[1];
-    const target = match[2].split('#')[0].trim();
+    const link = match[2];
+    const target = link.split('#')[0].trim();
     if (!target) continue;
 
     const rel = path.relative(SRC_DIR, path.resolve(noteDir, target));
@@ -586,7 +647,23 @@ function resolveEmbeddedFiles(data, relPath, content) {
     const source = findSourcePath(rel);
     if (!source) continue;
 
-    const mimeType = IMAGE_MIME_TYPES.get(path.extname(source).toLowerCase());
+    const ext = path.extname(source).toLowerCase();
+
+    if (ext === '.pdf') {
+      const page = Number(/[#&]page=(\d+)/.exec(link)?.[1] || 0);
+      if (page < 1) continue;
+      const jpeg = renderPdfPage(source, page);
+      if (!jpeg) continue;
+      files[id] = {
+        id,
+        mimeType: 'image/jpeg',
+        dataURL: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
+        created: Date.now(),
+      };
+      continue;
+    }
+
+    const mimeType = IMAGE_MIME_TYPES.get(ext);
     if (!mimeType) continue;
 
     try {
