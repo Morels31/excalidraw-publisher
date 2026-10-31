@@ -6,19 +6,18 @@
  * Excalidraw notes to self-contained SVG files.
  *
  * Usage:
- *   node convert.mjs [--watch] [--sweep] <src> <dest>
+ *   node convert.mjs [--watch] [--sweep] [--force] <src> <dest>
+ *
+ *   --force  Ignore the size/mtime cache and hash every source file.
  *
  * Environment:
  *   SRC_DIR, DEST_DIR, STATE_FILE, SITE_TITLE
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { JSDOM } from 'jsdom';
 import LZString from 'lz-string';
-import { Image, Path2D, createCanvas } from '@napi-rs/canvas';
 
 const CONVERTER_VERSION = '2.0.0';
 const LOG_PREFIX = '[Converter]';
@@ -27,66 +26,94 @@ const LOG_PREFIX = '[Converter]';
 // Headless DOM / canvas environment for Excalidraw's SVG renderer
 // ---------------------------------------------------------------------------
 
-const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
-  url: 'http://localhost',
-});
+/**
+ * Loading jsdom, the native canvas binding and the Excalidraw bundle costs
+ * noticeable CPU and memory, and a start where every note is cached never
+ * needs them. Import them on first use instead of at module load.
+ */
+let rendererPromise = null;
 
-globalThis.window = dom.window;
-globalThis.document = dom.window.document;
-globalThis.XMLSerializer = dom.window.XMLSerializer;
-globalThis.Node = dom.window.Node;
-globalThis.Element = dom.window.Element;
-globalThis.HTMLElement = dom.window.HTMLElement;
-globalThis.HTMLCanvasElement = dom.window.HTMLCanvasElement;
-globalThis.HTMLImageElement = dom.window.HTMLImageElement;
-globalThis.SVGElement = dom.window.SVGElement;
-globalThis.SVGSVGElement = dom.window.SVGSVGElement;
-globalThis.Path2D = Path2D;
-globalThis.Image = Image;
+async function getRenderer() {
+  if (!rendererPromise) {
+    rendererPromise = (async () => {
+      const { JSDOM } = await import('jsdom');
+      const { Image, Path2D, createCanvas } = await import('@napi-rs/canvas');
 
-// Node 22 exposes `navigator` as a getter-only global, so a plain assignment
-// throws. Re-define the property instead, and fall back to Node's navigator.
-try {
-  Object.defineProperty(globalThis, 'navigator', {
-    value: dom.window.navigator,
-    configurable: true,
-  });
-} catch {
-  // Node's built-in navigator is good enough if it cannot be replaced.
+      const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
+        url: 'http://localhost',
+      });
+
+      globalThis.window = dom.window;
+      globalThis.document = dom.window.document;
+      globalThis.XMLSerializer = dom.window.XMLSerializer;
+      globalThis.Node = dom.window.Node;
+      globalThis.Element = dom.window.Element;
+      globalThis.HTMLElement = dom.window.HTMLElement;
+      globalThis.HTMLCanvasElement = dom.window.HTMLCanvasElement;
+      globalThis.HTMLImageElement = dom.window.HTMLImageElement;
+      globalThis.SVGElement = dom.window.SVGElement;
+      globalThis.SVGSVGElement = dom.window.SVGSVGElement;
+      globalThis.Path2D = Path2D;
+      globalThis.Image = Image;
+
+      // Node 22 exposes `navigator` as a getter-only global, so a plain
+      // assignment throws. Re-define the property instead, and fall back to
+      // Node's navigator.
+      try {
+        Object.defineProperty(globalThis, 'navigator', {
+          value: dom.window.navigator,
+          configurable: true,
+        });
+      } catch {
+        // Node's built-in navigator is good enough if it cannot be replaced.
+      }
+
+      // jsdom has no FontFace implementation. Excalidraw only uses the object
+      // to build @font-face CSS; the actual Woff2 data is embedded by the
+      // renderer.
+      if (!globalThis.FontFace) {
+        globalThis.FontFace = class FontFace {
+          constructor(family, source, descriptors = {}) {
+            this.family = String(family).replace(/^["']|["']$/g, '');
+            this.source = source;
+            this.style = descriptors.style ?? 'normal';
+            this.weight = descriptors.weight ?? '400';
+            this.display = descriptors.display ?? 'swap';
+            this.unicodeRange = descriptors.unicodeRange ?? 'U+0-10FFFF';
+            this.status = 'loaded';
+          }
+
+          load() {
+            return Promise.resolve(this);
+          }
+        };
+      }
+
+      const { exportScene } = await import('@excalidraw/utils');
+
+      const renderEnvironment = {
+        document: dom.window.document,
+        createCanvas: (width, height) =>
+          createCanvas(
+            Math.max(1, Math.floor(width || 1)),
+            Math.max(1, Math.floor(height || 1)),
+          ),
+        createImage: () => new Image(),
+        createPath: (d) => new Path2D(d),
+        // Excalidraw embeds the fonts in the SVG itself, so no browser font
+        // loading is required for the exported file.
+        loadFonts: async () => {},
+      };
+
+      return { exportScene, renderEnvironment };
+    })().catch((err) => {
+      // Allow a later attempt instead of caching the rejection forever.
+      rendererPromise = null;
+      throw err;
+    });
+  }
+  return rendererPromise;
 }
-
-// jsdom has no FontFace implementation. Excalidraw only uses the object to
-// build @font-face CSS; the actual Woff2 data is embedded by the renderer.
-if (!globalThis.FontFace) {
-  globalThis.FontFace = class FontFace {
-    constructor(family, source, descriptors = {}) {
-      this.family = String(family).replace(/^["']|["']$/g, '');
-      this.source = source;
-      this.style = descriptors.style ?? 'normal';
-      this.weight = descriptors.weight ?? '400';
-      this.display = descriptors.display ?? 'swap';
-      this.unicodeRange = descriptors.unicodeRange ?? 'U+0-10FFFF';
-      this.status = 'loaded';
-    }
-
-    load() {
-      return Promise.resolve(this);
-    }
-  };
-}
-
-const { exportScene } = await import('@excalidraw/utils');
-
-const renderEnvironment = {
-  document: dom.window.document,
-  createCanvas: (width, height) =>
-    createCanvas(Math.max(1, Math.floor(width || 1)), Math.max(1, Math.floor(height || 1))),
-  createImage: () => new Image(),
-  createPath: (d) => new Path2D(d),
-  // Excalidraw embeds the fonts in the SVG itself, so no browser font loading
-  // is required for the exported file.
-  loadFonts: async () => {},
-};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -94,11 +121,14 @@ const renderEnvironment = {
 
 const rawArgs = process.argv.slice(2);
 let isWatch = false;
+let isForce = false;
 const positionalArgs = [];
 
 for (const arg of rawArgs) {
   if (arg === '--watch') {
     isWatch = true;
+  } else if (arg === '--force') {
+    isForce = true;
   } else if (arg === '--sweep') {
     // Default behaviour; accepted for explicitness.
   } else if (arg.startsWith('--')) {
@@ -410,6 +440,39 @@ function allOutputsExist(outputs) {
   });
 }
 
+/**
+ * Cheap change detector: size plus mtime, without reading the file. Editing a
+ * file updates its mtime, so an unchanged signature means the cached hash is
+ * still valid and the file never has to be read at all.
+ */
+function fileSignature(file) {
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile()) return null;
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+function signatureUnchanged(entry, sig) {
+  return Boolean(
+    entry && sig && entry.size === sig.size && entry.mtimeMs === sig.mtimeMs,
+  );
+}
+
+function outputsIntact(entry) {
+  return (
+    Boolean(entry) &&
+    Array.isArray(entry.outputs) &&
+    allOutputsExist(entry.outputs)
+  );
+}
+
+function withSignature(entry, sig) {
+  return sig ? { ...entry, size: sig.size, mtimeMs: sig.mtimeMs } : entry;
+}
+
 // ---------------------------------------------------------------------------
 // Excalidraw note parsing
 // ---------------------------------------------------------------------------
@@ -502,6 +565,7 @@ title: ${JSON.stringify(baseName)}
 }
 
 async function renderDrawing({ relPath, content, mdRel, svgRel, data }) {
+  const { exportScene, renderEnvironment } = await getRenderer();
   const appState = data.appState || {};
   const exportBackground = appState.exportBackground !== false;
 
@@ -620,6 +684,27 @@ async function convertOne(srcFile) {
   const key = toKey(relPath);
 
   if (ext === '.md') {
+    const mdRel = normalizeMdRel(relPath);
+    const svgRel = svgRelFor(mdRel);
+    const previous = state.files[key];
+    const sig = fileSignature(srcFile);
+    // A drawing note has two outputs, a plain note one. Accept either shape as
+    // long as it matches the current file name, so the note never has to be
+    // read on the fast path.
+    const knownOutputs =
+      Boolean(previous) &&
+      (sameOutputs(previous.outputs, [mdRel, svgRel]) ||
+        sameOutputs(previous.outputs, [mdRel]));
+
+    if (
+      !isForce &&
+      signatureUnchanged(previous, sig) &&
+      knownOutputs &&
+      outputsIntact(previous)
+    ) {
+      return 'cached';
+    }
+
     let content;
     try {
       content = fs.readFileSync(srcFile, 'utf8');
@@ -629,20 +714,16 @@ async function convertOne(srcFile) {
     }
 
     const hash = sha256String(content);
-    const mdRel = normalizeMdRel(relPath);
-    const svgRel = svgRelFor(mdRel);
-    const drawing = parseDrawing(content);
-    const expectedOutputs = drawing ? [mdRel, svgRel] : [mdRel];
-    const previous = state.files[key];
-
-    if (
-      previous &&
-      previous.hash === hash &&
-      sameOutputs(previous.outputs, expectedOutputs) &&
-      allOutputsExist(expectedOutputs)
-    ) {
+    // The mtime moved but the bytes did not (touch, rsync -t): refresh the
+    // signature and keep the existing output.
+    if (knownOutputs && previous.hash === hash && outputsIntact(previous)) {
+      state.files[key] = withSignature(previous, sig);
+      markStateDirty();
       return 'cached';
     }
+
+    const drawing = parseDrawing(content);
+    const expectedOutputs = drawing ? [mdRel, svgRel] : [mdRel];
 
     if (drawing) {
       try {
@@ -653,11 +734,10 @@ async function convertOne(srcFile) {
           svgRel,
           data: drawing,
         });
-        state.files[key] = {
-          hash,
-          kind: 'drawing',
-          outputs: expectedOutputs,
-        };
+        state.files[key] = withSignature(
+          { hash, kind: 'drawing', outputs: expectedOutputs },
+          sig,
+        );
         markStateDirty();
         return 'converted';
       } catch (err) {
@@ -668,7 +748,10 @@ async function convertOne(srcFile) {
         if (!sourceExists(svgRel)) {
           safeUnlink(path.join(DEST_DIR, svgRel));
         }
-        state.files[key] = { hash, kind: 'markdown', outputs: [mdRel] };
+        state.files[key] = withSignature(
+          { hash, kind: 'markdown', outputs: [mdRel] },
+          sig,
+        );
         markStateDirty();
         return 'converted';
       }
@@ -681,7 +764,10 @@ async function convertOne(srcFile) {
     ) {
       safeUnlink(path.join(DEST_DIR, svgRel));
     }
-    state.files[key] = { hash, kind: 'markdown', outputs: [mdRel] };
+    state.files[key] = withSignature(
+      { hash, kind: 'markdown', outputs: [mdRel] },
+      sig,
+    );
     markStateDirty();
     return 'converted';
   }
@@ -703,19 +789,34 @@ async function convertOne(srcFile) {
       }
     }
 
-    const hash = sha256File(srcFile);
     const previous = state.files[key];
+    const sig = fileSignature(srcFile);
     if (
-      previous &&
-      previous.hash === hash &&
+      !isForce &&
+      signatureUnchanged(previous, sig) &&
       sameOutputs(previous.outputs, [relPath]) &&
       allOutputsExist([relPath])
     ) {
       return 'cached';
     }
 
+    const hash = sha256File(srcFile);
+    if (
+      previous &&
+      previous.hash === hash &&
+      sameOutputs(previous.outputs, [relPath]) &&
+      allOutputsExist([relPath])
+    ) {
+      state.files[key] = withSignature(previous, sig);
+      markStateDirty();
+      return 'cached';
+    }
+
     copyAtomic(srcFile, path.join(DEST_DIR, relPath));
-    state.files[key] = { hash, kind: 'asset', outputs: [relPath] };
+    state.files[key] = withSignature(
+      { hash, kind: 'asset', outputs: [relPath] },
+      sig,
+    );
     markStateDirty();
     return 'converted';
   }
@@ -927,6 +1028,11 @@ let watcher = null;
 let shuttingDown = false;
 const queues = new Map();
 
+// Watcher events wait for this so the post-startup reconciliation sweep can
+// never run at the same time as a conversion for the same file (last write
+// would win, possibly publishing stale output).
+let reconcile = Promise.resolve();
+
 function enqueue(key, task) {
   const previous = queues.get(key) || Promise.resolve();
   const next = previous
@@ -944,9 +1050,16 @@ function enqueue(key, task) {
 async function startWatcher() {
   const { watch } = await import('chokidar');
 
+  let releaseReconcile;
+  reconcile = new Promise((resolve) => {
+    releaseReconcile = resolve;
+  });
+
   watcher = watch(SRC_DIR, {
     persistent: true,
-    ignoreInitial: false,
+    // main() already swept the vault, so re-announcing every existing file
+    // would only queue thousands of no-op conversions and flood the log.
+    ignoreInitial: true,
     followSymlinks: false,
     awaitWriteFinish: {
       stabilityThreshold: 1000,
@@ -961,6 +1074,7 @@ async function startWatcher() {
   const onFile = (event) => (filePath) => {
     const relPath = path.relative(SRC_DIR, filePath);
     enqueue(toKey(relPath), async () => {
+      await reconcile;
       log(`[${event}] ${relPath}`);
       if (event === 'unlink') {
         await unpublish(relPath);
@@ -976,6 +1090,7 @@ async function startWatcher() {
   watcher.on('unlinkDir', (dirPath) => {
     const relPath = path.relative(SRC_DIR, dirPath);
     enqueue(toKey(relPath), async () => {
+      await reconcile;
       log(`[unlinkDir] ${relPath}`);
       await unpublishDir(relPath);
     });
@@ -987,7 +1102,18 @@ async function startWatcher() {
     } catch {}
     process.exit(1);
   });
-  watcher.on('ready', () => log('Watcher ready.'));
+  watcher.on('ready', async () => {
+    // ignoreInitial also swallows files created between the sweep above and
+    // chokidar's baseline scan; sweep once more now that the baseline exists.
+    try {
+      await runSweep();
+    } catch (err) {
+      console.error(`${LOG_PREFIX} Reconcile sweep failed: ${err.message}`);
+    } finally {
+      releaseReconcile();
+    }
+    log('Watcher ready.');
+  });
 
   log(`Watching "${SRC_DIR}" for changes...`);
 }
