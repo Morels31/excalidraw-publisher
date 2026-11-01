@@ -24,7 +24,7 @@ import LZString from 'lz-string';
 
 // Bumped whenever converted output changes: loadState() drops the whole
 // manifest on a mismatch, which forces a full rebuild.
-const CONVERTER_VERSION = '2.2.0';
+const CONVERTER_VERSION = '2.2.1';
 const LOG_PREFIX = '[Converter]';
 
 // ---------------------------------------------------------------------------
@@ -699,8 +699,6 @@ function buildCompanionMarkdown(relPath, content) {
   return `---
 title: ${JSON.stringify(baseName)}
 ---
-
-# ${baseName}
 
 ![${altText}](<${svgFileName}>)${textBlock}${linksBlock}
 `;
@@ -1452,7 +1450,6 @@ function pruneOrphans(sourceFiles) {
 
 function ensureRootIndex() {
   const indexFile = path.join(DEST_DIR, 'index.md');
-  if (fs.existsSync(indexFile)) return;
 
   const directories = [];
   let entries = [];
@@ -1479,16 +1476,35 @@ function ensureRootIndex() {
     .map((dir) => `- [[${dir}/index|${dir}]]`)
     .join('\n');
 
-  const content = `---
+  const header = `---
 title: ${JSON.stringify(SITE_TITLE)}
----
+---`;
+  const intro = 'Benvenuto nella raccolta note. Scegli una cartella per iniziare:';
+  const content = `${header}
 
-# ${SITE_TITLE}
-
-Benvenuto nella raccolta note. Scegli una cartella per iniziare:
+${intro}
 
 ${links}
 `;
+
+  if (fs.existsSync(indexFile)) {
+    // Older versions duplicated the site title as a Markdown heading, while
+    // Quartz already renders it from the frontmatter. Replace only the known
+    // generated prefix so edits below it survive.
+    const existing = fs.readFileSync(indexFile, 'utf8');
+    const legacyPrefix = `${header}
+
+# ${SITE_TITLE}
+
+${intro}`;
+    if (existing.startsWith(legacyPrefix)) {
+      writeAtomic(indexFile, `${header}
+
+${intro}${existing.slice(legacyPrefix.length)}`);
+    }
+    return;
+  }
+
   writeAtomic(indexFile, content);
 }
 
