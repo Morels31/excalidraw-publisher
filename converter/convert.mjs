@@ -24,7 +24,7 @@ import LZString from 'lz-string';
 
 // Bumped whenever converted output changes: loadState() drops the whole
 // manifest on a mismatch, which forces a full rebuild.
-const CONVERTER_VERSION = '2.1.0';
+const CONVERTER_VERSION = '2.2.0';
 const LOG_PREFIX = '[Converter]';
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,7 @@ async function getRenderer() {
       }
 
       const { exportScene } = await import('@excalidraw/utils');
+      const { getStroke } = await import('perfect-freehand');
 
       const renderEnvironment = {
         document: dom.window.document,
@@ -110,7 +111,7 @@ async function getRenderer() {
         loadFonts: async () => {},
       };
 
-      return { exportScene, renderEnvironment };
+      return { exportScene, renderEnvironment, getStroke };
     })().catch((err) => {
       // Allow a later attempt instead of caching the rejection forever.
       rendererPromise = null;
@@ -705,10 +706,328 @@ title: ${JSON.stringify(baseName)}
 `;
 }
 
+// ---------------------------------------------------------------------------
+// Custom freedraw pens
+// ---------------------------------------------------------------------------
+
+// Obsidian's Excalidraw plugin stores the pen used for every stroke in
+// `element.customData.strokeOptions`, and its Excalidraw fork renders freedraw
+// with those options. Upstream Excalidraw only knows its own defaults
+// (thinning 0.6, smoothing 0.5, easeOutSine, no taper), so exporting with it
+// gives every stroke the default pen shape regardless of what was drawn.
+//
+// The renderer has no hook for a precomputed path, so the drawing is exported
+// once and the `d` of each freedraw path is replaced with the outline the pen
+// describes. The math below is the fork's `freedrawPath.ts`, ported verbatim.
+const EASING_FUNCTIONS = (() => {
+  const pow = Math.pow;
+  const sqrt = Math.sqrt;
+  const sin = Math.sin;
+  const cos = Math.cos;
+  const PI = Math.PI;
+  const c1 = 1.70158;
+  const c2 = c1 * 1.525;
+  const c3 = c1 + 1;
+  const c4 = (2 * PI) / 3;
+  const c5 = (2 * PI) / 4.5;
+
+  const bounceOut = (x) => {
+    const n1 = 7.5625;
+    const d1 = 2.75;
+    if (x < 1 / d1) return n1 * x * x;
+    if (x < 2 / d1) return n1 * (x -= 1.5 / d1) * x + 0.75;
+    if (x < 2.5 / d1) return n1 * (x -= 2.25 / d1) * x + 0.9375;
+    return n1 * (x -= 2.625 / d1) * x + 0.984375;
+  };
+
+  return {
+    linear: (x) => x,
+    easeInQuad: (x) => x * x,
+    easeOutQuad: (x) => 1 - (1 - x) * (1 - x),
+    easeInOutQuad: (x) => (x < 0.5 ? 2 * x * x : 1 - pow(-2 * x + 2, 2) / 2),
+    easeInCubic: (x) => x * x * x,
+    easeOutCubic: (x) => 1 - pow(1 - x, 3),
+    easeInOutCubic: (x) =>
+      x < 0.5 ? 4 * x * x * x : 1 - pow(-2 * x + 2, 3) / 2,
+    easeInQuart: (x) => x * x * x * x,
+    easeOutQuart: (x) => 1 - pow(1 - x, 4),
+    easeInOutQuart: (x) =>
+      x < 0.5 ? 8 * x * x * x * x : 1 - pow(-2 * x + 2, 4) / 2,
+    easeInQuint: (x) => x * x * x * x * x,
+    easeOutQuint: (x) => 1 - pow(1 - x, 5),
+    easeInOutQuint: (x) =>
+      x < 0.5 ? 16 * x * x * x * x * x : 1 - pow(-2 * x + 2, 5) / 2,
+    easeInSine: (x) => 1 - cos((x * PI) / 2),
+    easeOutSine: (x) => sin((x * PI) / 2),
+    easeInOutSine: (x) => -(cos(PI * x) - 1) / 2,
+    easeInExpo: (x) => (x === 0 ? 0 : pow(2, 10 * x - 10)),
+    easeOutExpo: (x) => (x === 1 ? 1 : 1 - pow(2, -10 * x)),
+    easeInOutExpo: (x) =>
+      x === 0
+        ? 0
+        : x === 1
+          ? 1
+          : x < 0.5
+            ? pow(2, 20 * x - 10) / 2
+            : (2 - pow(2, -20 * x + 10)) / 2,
+    easeInCirc: (x) => 1 - sqrt(1 - pow(x, 2)),
+    easeOutCirc: (x) => sqrt(1 - pow(x - 1, 2)),
+    easeInOutCirc: (x) =>
+      x < 0.5
+        ? (1 - sqrt(1 - pow(2 * x, 2))) / 2
+        : (sqrt(1 - pow(-2 * x + 2, 2)) + 1) / 2,
+    easeInBack: (x) => c3 * x * x * x - c1 * x * x,
+    easeOutBack: (x) => 1 + c3 * pow(x - 1, 3) + c1 * pow(x - 1, 2),
+    easeInOutBack: (x) =>
+      x < 0.5
+        ? (pow(2 * x, 2) * ((c2 + 1) * 2 * x - c2)) / 2
+        : (pow(2 * x - 2, 2) * ((c2 + 1) * (x * 2 - 2) + c2) + 2) / 2,
+    easeInElastic: (x) =>
+      x === 0
+        ? 0
+        : x === 1
+          ? 1
+          : -pow(2, 10 * x - 10) * sin((x * 10 - 10.75) * c4),
+    easeOutElastic: (x) =>
+      x === 0
+        ? 0
+        : x === 1
+          ? 1
+          : pow(2, -10 * x) * sin((x * 10 - 0.75) * c4) + 1,
+    easeInOutElastic: (x) =>
+      x === 0
+        ? 0
+        : x === 1
+          ? 1
+          : x < 0.5
+            ? -(pow(2, 20 * x - 10) * sin((20 * x - 11.125) * c5)) / 2
+            : (pow(2, -20 * x + 10) * sin((20 * x - 11.125) * c5)) / 2 + 1,
+    easeInBounce: (x) => 1 - bounceOut(1 - x),
+    easeOutBounce: bounceOut,
+    easeInOutBounce: (x) =>
+      x < 0.5
+        ? (1 - bounceOut(1 - 2 * x)) / 2
+        : (1 + bounceOut(2 * x - 1)) / 2,
+  };
+})();
+
+const SVG_PATH_PRECISION =
+  /(\s?[A-Z]?,?-?[0-9]*\.[0-9]{0,2})(([0-9]|e|-)*)/g;
+
+const midpoint = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+
+function svgPathFromStroke(points) {
+  if (!points.length) return '';
+  const lastIndex = points.length - 1;
+  return points
+    .reduce(
+      (acc, point, index, all) => {
+        if (index === lastIndex) {
+          acc.push(point, midpoint(point, all[0]), 'L', all[0], 'Z');
+        } else {
+          acc.push(point, midpoint(point, all[index + 1]));
+        }
+        return acc;
+      },
+      ['M', points[0], 'Q'],
+    )
+    .join(' ')
+    .replace(SVG_PATH_PRECISION, '$1');
+}
+
+function freedrawInputPoints(element) {
+  if (element.simulatePressure) return element.points;
+  if (element.points.length === 0) return [[0, 0, 0.5]];
+  return element.points.map(([x, y], index) => [
+    x,
+    y,
+    element.pressures[index],
+  ]);
+}
+
+function freedrawPath(element, getStroke, useCustomPen) {
+  const customOptions = useCustomPen
+    ? element.customData?.strokeOptions?.options
+    : null;
+  const inputPoints = freedrawInputPoints(element);
+
+  if (!customOptions) {
+    return svgPathFromStroke(
+      getStroke(inputPoints, {
+        simulatePressure: element.simulatePressure,
+        size: element.strokeWidth * 4.25,
+        thinning: 0.6,
+        smoothing: 0.5,
+        streamline: element.strokeOptions?.streamline ?? 0.5,
+        easing: EASING_FUNCTIONS.easeOutSine,
+        last: true,
+      }),
+    );
+  }
+
+  const options = {
+    ...customOptions,
+    simulatePressure:
+      customOptions.simulatePressure ?? element.simulatePressure,
+    size: element.strokeWidth * 4.25,
+    last: true,
+    easing: EASING_FUNCTIONS[customOptions.easing] ?? ((t) => t),
+  };
+
+  if (customOptions.start?.easing) {
+    options.start = {
+      ...customOptions.start,
+      easing: EASING_FUNCTIONS[customOptions.start.easing] ?? ((t) => t),
+    };
+  }
+  if (customOptions.end?.easing) {
+    options.end = {
+      ...customOptions.end,
+      easing: EASING_FUNCTIONS[customOptions.end.easing] ?? ((t) => t),
+    };
+  }
+
+  return svgPathFromStroke(getStroke(inputPoints, options));
+}
+
+// Matches the `filter: invert(93%) hue-rotate(180deg)` Excalidraw applies to
+// colours in a dark-theme export. Only outlined pens need it: their fill is
+// the pen's background colour, which the exporter never sees.
+const DARK_MODE_INVERT = 0.93;
+
+function parseHexColor(color) {
+  const match = /^#([0-9a-f]{3,8})$/i.exec(color);
+  if (!match) return null;
+
+  let hex = match[1];
+  if (hex.length === 3 || hex.length === 4) {
+    hex = hex
+      .split('')
+      .map((digit) => digit + digit)
+      .join('');
+  }
+  if (hex.length !== 6 && hex.length !== 8) return null;
+
+  return {
+    r: parseInt(hex.slice(0, 2), 16),
+    g: parseInt(hex.slice(2, 4), 16),
+    b: parseInt(hex.slice(4, 6), 16),
+    a: hex.length === 8 ? parseInt(hex.slice(6, 8), 16) : 255,
+  };
+}
+
+function applyDarkModeFilter(color, dark) {
+  if (!dark || color === 'transparent') return color;
+  const rgb = parseHexColor(color);
+  if (!rgb) return color;
+
+  const invertChannel = (value) =>
+    Math.max(
+      0,
+      Math.min(
+        255,
+        Math.round(
+          value * (1 - DARK_MODE_INVERT) + (255 - value) * DARK_MODE_INVERT,
+        ),
+      ),
+    );
+  const r = invertChannel(rgb.r) / 255;
+  const g = invertChannel(rgb.g) / 255;
+  const b = invertChannel(rgb.b) / 255;
+
+  // hue-rotate(180deg) matrix, applied after the inversion.
+  const rotated = [
+    -0.574 * r + 1.43 * g + 0.144 * b,
+    0.426 * r + 0.43 * g + 0.144 * b,
+    0.426 * r + 1.43 * g - 0.856 * b,
+  ].map((value) =>
+    Math.max(0, Math.min(255, Math.round(value * 255)))
+      .toString(16)
+      .padStart(2, '0'),
+  );
+
+  const alpha = rgb.a === 255 ? '' : rgb.a.toString(16).padStart(2, '0');
+  return `#${rotated.join('')}${alpha}`;
+}
+
+/**
+ * Replace the outline of every freedraw stroke that carries custom pen
+ * settings. Nodes are matched by their exported `d`, which is deterministic,
+ * so an exporter change leaves the affected strokes untouched instead of
+ * corrupting them.
+ */
+function replaceFreedrawPaths(svg, elements, getStroke, dark) {
+  const pathsByD = new Map();
+  for (const node of svg.querySelectorAll('path[d]')) {
+    const d = node.getAttribute('d');
+    const list = pathsByD.get(d);
+    if (list) list.push(node);
+    else pathsByD.set(d, [node]);
+  }
+
+  let unmatched = 0;
+  for (const element of elements) {
+    if (
+      element.type !== 'freedraw' ||
+      element.isDeleted ||
+      !element.customData?.strokeOptions
+    ) {
+      continue;
+    }
+
+    const defaultD = freedrawPath(element, getStroke, false);
+    const node = pathsByD.get(defaultD)?.shift();
+    if (!node) {
+      unmatched += 1;
+      continue;
+    }
+
+    const customD = freedrawPath(element, getStroke, true);
+    const pen = element.customData.strokeOptions;
+    // Most colour-only pens produce the same outline; leave them byte-for-byte
+    // identical so unchanged drawings do not churn.
+    if (customD === defaultD && !pen.hasOutline) continue;
+
+    const wrapper = node.parentElement;
+    if (!wrapper) continue;
+
+    if (pen.hasOutline) {
+      const outline = svg.ownerDocument.createElementNS(
+        'http://www.w3.org/2000/svg',
+        'path',
+      );
+      outline.setAttribute('fill', 'none');
+      // The exporter already applied the theme filter to strokeColor, which is
+      // exactly what the fork uses for the outline.
+      outline.setAttribute('stroke', node.getAttribute('fill'));
+      outline.setAttribute(
+        'stroke-width',
+        `${element.strokeWidth * (pen.outlineWidth ?? 1)}`,
+      );
+      outline.setAttribute('d', customD);
+      wrapper.insertBefore(outline, node);
+      node.setAttribute(
+        'fill',
+        applyDarkModeFilter(element.backgroundColor || 'transparent', dark),
+      );
+    }
+
+    node.setAttribute('d', customD);
+  }
+
+  if (unmatched > 0) {
+    console.warn(
+      `${LOG_PREFIX} ${unmatched} freedraw path(s) had no matching exported ` +
+        'outline; they keep the default pen shape.',
+    );
+  }
+}
+
 async function renderDrawing({ relPath, content, mdRel, svgRel, data, files }) {
-  const { exportScene, renderEnvironment } = await getRenderer();
+  const { exportScene, renderEnvironment, getStroke } = await getRenderer();
   const appState = data.appState || {};
   const exportBackground = appState.exportBackground !== false;
+  const dark = Boolean(appState.exportWithDarkMode);
 
   const svg = await exportScene({
     type: 'svg',
@@ -726,6 +1045,8 @@ async function renderDrawing({ relPath, content, mdRel, svgRel, data, files }) {
       environment: renderEnvironment,
     },
   });
+
+  replaceFreedrawPaths(svg, data.elements, getStroke, dark);
 
   writeAtomic(path.join(DEST_DIR, svgRel), svg.outerHTML);
   writeAtomic(
