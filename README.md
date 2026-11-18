@@ -36,7 +36,7 @@ If you must, you are strongly adviced to put it behind a reverse proxy with a so
 The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`).
 
 > [!NOTE]
-> the first start will probably be slow because of all the drawings that need to be converted.
+> The first start will probably be slow because of all the drawings that need to be converted.
 
 ## How it works
 
