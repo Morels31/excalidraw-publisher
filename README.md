@@ -36,7 +36,8 @@ If you must, you are strongly adviced to put it behind a reverse proxy with a so
 The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`).
 
 > [!NOTE]
-> The first start will probably be slow because of all the drawings that need to be converted.
+> The first start will probably be slow because of all the drawings that need to be converted,
+> nginx waits for the first conversion to finish before starting, so be patient, later starts will be much faster.
 
 ## How it works
 
