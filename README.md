@@ -8,6 +8,9 @@ It automatically renders Excalidraw drawings into vector SVGs, syncs markdown no
 
 I really do not like to **SLOP** code, but i needed this, and honestly i usually care about code quality, this time i do not. Soo it's half **SLOPPED**.
 
+It's not advised to expose this to the internet.
+If you must, you are strongly adviced to put it behind a reverse proxy with a solid authentication layer like Keycloak/Authelia, or ideally behind a VPN.
+
 ## Setup
 
 1. **Configure the environment**:
@@ -30,7 +33,10 @@ I really do not like to **SLOP** code, but i needed this, and honestly i usually
    docker compose up -d --build
    ```
 
-The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`), ready to be placed behind HAProxy or your reverse proxy.
+The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`).
+
+> [!NOTE]
+> the first start will probably be slow because of all the drawings that need to be converted.
 
 ## How it works
 
