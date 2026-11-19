@@ -1705,8 +1705,8 @@ async function startWatcher() {
 
   watcher = watch(SRC_DIR, {
     persistent: true,
-    // main() already swept the vault, so re-announcing every existing file
-    // would only queue thousands of no-op conversions and flood the log.
+    // The ready handler sweeps the entire vault once the baseline scan finishes;
+    // announcing every existing file as `add` would flood the queue and logs.
     ignoreInitial: true,
     followSymlinks: false,
     awaitWriteFinish: {
@@ -1759,16 +1759,22 @@ async function startWatcher() {
     process.exit(1);
   });
   watcher.on('ready', async () => {
-    // ignoreInitial also swallows files created between the sweep above and
-    // chokidar's baseline scan; sweep once more now that the baseline exists.
-    // No forced hashing here: anything created in that gap has a fresh
-    // signature anyway.
+    // Run the single startup sweep once chokidar's baseline exists so events
+    // arriving during the sweep serialize cleanly through `convertQueued`.
+    // If this initial sweep fails, fail fast instead of leaving Quartz on
+    // incomplete content.
     try {
-      await runSweep();
+      await runSweep(isForce);
     } catch (err) {
-      logError(`Reconcile sweep failed: ${err.message}`);
+      logError(`Initial sweep failed: ${err.message}`);
+      try {
+        await watcher.close();
+      } catch {}
+      saveState();
+      process.exit(1);
     }
     startSweepTimer();
+    if (process.connected) process.send('ready');
     log('Watcher ready.');
   });
 
@@ -1865,11 +1871,10 @@ async function main() {
   log(`Source: "${SRC_DIR}" -> Destination: "${DEST_DIR}"`);
   log(`State: "${STATE_FILE}"`);
 
-  await runSweep(isForce);
-
   if (isWatch) {
     await startWatcher();
   } else {
+    await runSweep(isForce);
     saveState();
   }
 }

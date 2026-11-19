@@ -3,7 +3,7 @@ set -eu
 
 SRC="${SRC_DIR:-/vault-input}"
 DEST="${DEST_DIR:-/usr/src/app/content}"
-CONVERTER="/opt/converter/convert.mjs"
+SUPERVISOR="/opt/converter/supervisor.mjs"
 
 # Cache manifest stored in the content directory so it persists across restarts.
 # Quartz automatically ignores .converter-state.json.
@@ -53,38 +53,4 @@ if [ ! -d "$SRC" ] || [ ! -r "$SRC" ]; then
   exit 1
 fi
 
-log_run() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [run] $*"
-}
-
-log_run "Running initial conversion sweep..."
-node "$CONVERTER" --sweep "$SRC" "$DEST"
-
-log_run "Starting converter supervisor..."
-(
-  trap 'exit 0' TERM INT
-  while true; do
-    node "$CONVERTER" --watch "$SRC" "$DEST" &
-    CHILD_PID=$!
-    wait "$CHILD_PID" || true
-    log_run "Converter exited; restarting in 2s..." >&2
-    sleep 2
-  done
-) &
-SUPERVISOR_PID=$!
-
-cleanup() {
-  kill "$SUPERVISOR_PID" 2>/dev/null || true
-  if [ -n "${QUARTZ_PID:-}" ]; then
-    kill "$QUARTZ_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup TERM INT EXIT
-
-# Start Quartz only after the synchronous sweep has populated content/.
-# Watch mode rebuilds public/site on changes; it never opens a port, the nginx
-# container serves the output. Invoke the bundled CLI directly instead of
-# `npx` so the container never touches npm's resolution/cache paths.
-node /usr/src/app/quartz/bootstrap-cli.mjs build --watch --concurrency=4 --output "$PUBLIC/site" &
-QUARTZ_PID=$!
-wait "$QUARTZ_PID"
+exec node "$SUPERVISOR" "$SRC" "$DEST" "$PUBLIC/site"

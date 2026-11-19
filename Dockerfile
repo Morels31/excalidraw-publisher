@@ -16,7 +16,7 @@ COPY converter/package.json converter/package-lock.json ./
 RUN npm ci --omit=dev \
     && npm cache clean --force
 
-COPY converter/convert.mjs ./
+COPY converter/convert.mjs converter/supervisor.mjs ./
 
 WORKDIR /usr/src/app
 
