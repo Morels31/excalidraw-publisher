@@ -130,6 +130,21 @@ let isWatch = false;
 // Only the literal "1" enables it, so `STARTUP_HASH_CHECK=false` in .env stays
 // off instead of becoming a truthy string.
 let isForce = (process.env.STARTUP_HASH_CHECK || '').trim() === '1';
+// Seconds between background reconciliation sweeps in watch mode; 0 disables
+// them. Writes made outside the container never reach its inotify when the
+// vault comes from a network or FUSE-backed share. Polling every watched file
+// costs thousands of stats per pass, so a periodic sweep that reuses the mtime
+// cache is the cheap alternative.
+const sweepSeconds = (() => {
+  const raw = (process.env.SWEEP_INTERVAL || '').trim();
+  if (raw === '') return 3600;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.warn(`${LOG_PREFIX} Ignoring invalid SWEEP_INTERVAL "${raw}".`);
+    return 3600;
+  }
+  return Math.floor(parsed);
+})();
 const positionalArgs = [];
 
 for (const arg of rawArgs) {
@@ -399,24 +414,50 @@ function isSafeSourceFile(file) {
  * Resolve a source path case-insensitively without following symlinks.
  */
 function findSourcePath(relPath) {
-  if (!relPath || isExcludedRel(relPath)) return null;
-  const direct = path.join(SRC_DIR, relPath);
-  try {
-    if (fs.lstatSync(direct).isFile()) return direct;
-  } catch {}
+  if (!relPath || path.isAbsolute(relPath) || isExcludedRel(relPath)) return null;
+  const parts = relPath.split('/').filter((part) => part && part !== '.');
+  if (parts.length === 0 || parts.some((part) => part === '..')) return null;
 
-  const dir = path.dirname(direct);
-  const wanted = path.basename(direct).toLowerCase();
-  try {
-    for (const name of fs.readdirSync(dir)) {
-      if (name.toLowerCase() !== wanted) continue;
-      const full = path.join(dir, name);
+  const direct = path.join(SRC_DIR, ...parts);
+  if (isSafeSourceFile(direct)) return direct;
+
+  let current = SRC_DIR;
+  for (let i = 0; i < parts.length; i += 1) {
+    const isLast = i === parts.length - 1;
+    const wanted = parts[i].toLowerCase();
+    const exact = path.join(current, parts[i]);
+    let next = null;
+
+    try {
+      const stat = fs.lstatSync(exact);
+      if (isLast ? stat.isFile() : stat.isDirectory()) next = exact;
+    } catch {}
+
+    if (!next) {
+      let entries;
       try {
-        if (fs.lstatSync(full).isFile()) return full;
-      } catch {}
+        entries = fs.readdirSync(current);
+      } catch {
+        return null;
+      }
+      for (const name of entries) {
+        if (name.toLowerCase() !== wanted) continue;
+        const candidate = path.join(current, name);
+        try {
+          const stat = fs.lstatSync(candidate);
+          if (isLast ? stat.isFile() : stat.isDirectory()) {
+            next = candidate;
+            break;
+          }
+        } catch {}
+      }
     }
-  } catch {}
-  return null;
+
+    if (!next) return null;
+    current = next;
+  }
+
+  return isSafeSourceFile(current) ? current : null;
 }
 
 function sourceExists(relPath) {
@@ -1424,10 +1465,14 @@ function pruneOrphans(sourceFiles) {
     const ext = path.extname(relPath).toLowerCase();
 
     if (ext === '.svg') {
-      if (sourceByKey.has(key)) continue; // a real source .svg asset
+      // The snapshot is a fast path; `sourceExists`/`findSourcePath` also see
+      // files created after it was taken (the watcher may have published them
+      // while this sweep was running), which must not be pruned as orphans.
+      if (sourceByKey.has(key) || sourceExists(relPath)) continue;
 
-      const mdKey = `${key.slice(0, -'.svg'.length)}.md`;
-      const mdSource = sourceByKey.get(mdKey);
+      const mdRel = `${relPath.slice(0, -'.svg'.length)}.md`;
+      const mdKey = toKey(mdRel);
+      const mdSource = sourceByKey.get(mdKey) || findSourcePath(mdRel);
       if (mdSource) {
         try {
           if (parseDrawing(fs.readFileSync(mdSource, 'utf8'))) continue;
@@ -1438,9 +1483,17 @@ function pruneOrphans(sourceFiles) {
       continue;
     }
 
-    if (sourceByKey.has(key)) continue;
+    if (sourceByKey.has(key) || sourceExists(relPath)) continue;
     if (safeUnlink(destFile)) pruned += 1;
   }
+
+  let statePruned = 0;
+  for (const entryKey of Object.keys(state.files)) {
+    if (sourceByKey.has(entryKey) || sourceExists(entryKey)) continue;
+    delete state.files[entryKey];
+    statePruned += 1;
+  }
+  if (statePruned > 0) markStateDirty();
 
   cleanEmptyDirectories(DEST_DIR);
   if (pruned > 0) {
@@ -1513,8 +1566,6 @@ async function runSweep(force = false) {
   assertSourceReady(files, errors);
   assertNoCaseCollisions(files, dirs);
 
-  pruneOrphans(files);
-
   // Markdown first so a drawing can claim <base>.svg before an asset copy.
   files.sort((left, right) => {
     const leftMd = path.extname(left).toLowerCase() === '.md' ? 0 : 1;
@@ -1529,7 +1580,7 @@ async function runSweep(force = false) {
 
   for (const file of files) {
     try {
-      const result = await convertOne(file, force);
+      const result = await convertQueued(file, force);
       if (result === 'converted') converted += 1;
       else if (result === 'cached') cached += 1;
       else skipped += 1;
@@ -1539,6 +1590,17 @@ async function runSweep(force = false) {
         `${LOG_PREFIX} Failed to process ${path.relative(SRC_DIR, file)}: ${err.message}`,
       );
     }
+  }
+
+  // Prune against a fresh listing: a file created or removed while the sweep
+  // was running is already handled by the watcher, and pruning with the
+  // snapshot taken above would delete its output or keep a stale page alive.
+  try {
+    const after = walkDirectory(SRC_DIR);
+    assertSourceReady(after.files, after.errors);
+    pruneOrphans(after.files);
+  } catch (err) {
+    console.error(`${LOG_PREFIX} Skipping prune: ${err.message}`);
   }
 
   ensureRootIndex();
@@ -1555,13 +1617,9 @@ async function runSweep(force = false) {
 // ---------------------------------------------------------------------------
 
 let watcher = null;
+let sweepTimer = null;
 let shuttingDown = false;
 const queues = new Map();
-
-// Watcher events wait for this so the post-startup reconciliation sweep can
-// never run at the same time as a conversion for the same file (last write
-// would win, possibly publishing stale output).
-let reconcile = Promise.resolve();
 
 function enqueue(key, task) {
   const previous = queues.get(key) || Promise.resolve();
@@ -1575,6 +1633,27 @@ function enqueue(key, task) {
     });
   queues.set(key, next);
   return next;
+}
+
+/**
+ * Convert through the per-file queue. Sweeps and watcher events share it, so a
+ * file is never converted twice at once and the later read always wins: the
+ * sweep either runs before a pending event (which then re-reads) or after the
+ * running conversion, never in the middle of it.
+ */
+async function convertQueued(srcFile, force) {
+  const key = toKey(path.relative(SRC_DIR, srcFile));
+  let outcome = 'skipped';
+  let failure = null;
+  await enqueue(key, async () => {
+    try {
+      outcome = await convertOne(srcFile, force);
+    } catch (err) {
+      failure = err;
+    }
+  });
+  if (failure) throw failure;
+  return outcome;
 }
 
 /**
@@ -1599,11 +1678,6 @@ function caseTwin(relPath) {
 async function startWatcher() {
   const { watch } = await import('chokidar');
 
-  let releaseReconcile;
-  reconcile = new Promise((resolve) => {
-    releaseReconcile = resolve;
-  });
-
   watcher = watch(SRC_DIR, {
     persistent: true,
     // main() already swept the vault, so re-announcing every existing file
@@ -1623,7 +1697,6 @@ async function startWatcher() {
   const onFile = (event) => (filePath) => {
     const relPath = path.relative(SRC_DIR, filePath);
     enqueue(toKey(relPath), async () => {
-      await reconcile;
       if (event === 'add') {
         const twin = caseTwin(relPath);
         if (twin) {
@@ -1649,7 +1722,6 @@ async function startWatcher() {
   watcher.on('unlinkDir', (dirPath) => {
     const relPath = path.relative(SRC_DIR, dirPath);
     enqueue(toKey(relPath), async () => {
-      await reconcile;
       log(`[unlinkDir] ${relPath}`);
       await unpublishDir(relPath);
     });
@@ -1670,19 +1742,59 @@ async function startWatcher() {
       await runSweep();
     } catch (err) {
       console.error(`${LOG_PREFIX} Reconcile sweep failed: ${err.message}`);
-    } finally {
-      releaseReconcile();
     }
+    startSweepTimer();
     log('Watcher ready.');
   });
 
   log(`Watching "${SRC_DIR}" for changes...`);
 }
 
+/**
+ * Sweep on a timer to pick up writes the kernel never reported. Only needed
+ * when the source lives on a filesystem that does not forward inotify events
+ * (NFS, SMB, 9p, FUSE-backed shares); elsewhere it is cheap, because the sweep
+ * reuses the mtime cache.
+ */
+function startSweepTimer() {
+  if (sweepSeconds <= 0) {
+    log('Periodic sweep disabled.');
+    return;
+  }
+
+  // setTimeout clamps anything above 2^31-1 ms, which would turn a very large
+  // interval into a near-constant rebuild loop.
+  const interval = Math.min(sweepSeconds * 1000, 2 ** 31 - 1);
+
+  const scheduleNext = () => {
+    if (shuttingDown) return;
+    sweepTimer = setTimeout(async () => {
+      sweepTimer = null;
+      if (shuttingDown) return;
+      try {
+        await runSweep();
+      } catch (err) {
+        console.error(`${LOG_PREFIX} Periodic sweep failed: ${err.message}`);
+      } finally {
+        scheduleNext();
+      }
+    }, interval);
+    // The watcher keeps the process alive; the timer must not.
+    sweepTimer.unref();
+  };
+
+  scheduleNext();
+  log(`Periodic sweep every ${sweepSeconds}s.`);
+}
+
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   log(`Received ${signal}; shutting down.`);
+  if (sweepTimer) {
+    clearTimeout(sweepTimer);
+    sweepTimer = null;
+  }
   try {
     await watcher?.close();
   } catch {}

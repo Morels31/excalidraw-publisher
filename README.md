@@ -39,6 +39,9 @@ The site is served at `http://<server-ip>:8080` (`HOST_PORT` in `.env`).
 > The first start will probably be slow because of all the drawings that need to be converted,
 > nginx waits for the first conversion to finish before starting, so be patient, later starts will be much faster.
 
+> [!TIP]
+> If the vault comes from a network or FUSE-backed share (`NFS`, `SMB`, `9p`, cloud-sync mounts), edits made outside the container never reach its inotify. A sweep runs every `SWEEP_INTERVAL` seconds (default one hour) to pick them up; set it to `0` to disable it, or lower it for faster updates.
+
 ## How it works
 
 - **Excalidraw to SVG**: Detects drawings (both raw and compressed JSON) and renders them into self-contained SVGs with embedded fonts, images, and rasterized PDF pages.

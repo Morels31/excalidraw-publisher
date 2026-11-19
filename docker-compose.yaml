@@ -12,6 +12,10 @@ services:
       - BASE_URL=${BASE_URL:-notes.example.com}
       - SITE_TITLE=${SITE_TITLE:-Appunti Uni}
       - STARTUP_HASH_CHECK=${STARTUP_HASH_CHECK:-0}
+      # Writes made outside the container never reach its inotify when the
+      # vault comes from a network or FUSE-backed share. A periodic sweep
+      # picks them up; 0 disables it.
+      - SWEEP_INTERVAL=${SWEEP_INTERVAL:-3600}
     security_opt:
       - no-new-privileges:true
     cap_drop:
