@@ -1503,17 +1503,24 @@ function pruneOrphans(sourceFiles) {
       // The snapshot is a fast path; `sourceExists`/`findSourcePath` also see
       // files created after it was taken (the watcher may have published them
       // while this sweep was running), which must not be pruned as orphans.
-      if (sourceByKey.has(key) || sourceExists(relPath)) continue;
+      if (sourceByKey.has(key)) continue;
 
       const mdRel = `${relPath.slice(0, -'.svg'.length)}.md`;
       const mdKey = toKey(mdRel);
       const mdSource = sourceByKey.get(mdKey) || findSourcePath(mdRel);
       if (mdSource) {
+        // `state.files[mdKey]` is already current from the loop above; avoid
+        // re-reading and LZ-decompressing every drawing on every sweep.
+        const entry = state.files[mdKey];
+        if (entry?.kind === 'drawing' && entry.outputs?.includes(relPath)) {
+          continue;
+        }
         try {
           if (parseDrawing(fs.readFileSync(mdSource, 'utf8'))) continue;
         } catch {}
       }
 
+      if (sourceExists(relPath)) continue;
       if (safeUnlink(destFile)) pruned += 1;
       continue;
     }
@@ -1649,7 +1656,7 @@ async function runSweep(force = false) {
   }
 
   ensureRootIndex();
-  saveState(true);
+  saveState();
 
   const elapsed = formatDuration(performance.now() - startedAt);
   log(
