@@ -53,17 +53,21 @@ if [ ! -d "$SRC" ] || [ ! -r "$SRC" ]; then
   exit 1
 fi
 
-echo "[run] Running initial conversion sweep..."
+log_run() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [run] $*"
+}
+
+log_run "Running initial conversion sweep..."
 node "$CONVERTER" --sweep "$SRC" "$DEST"
 
-echo "[run] Starting converter supervisor..."
+log_run "Starting converter supervisor..."
 (
   trap 'exit 0' TERM INT
   while true; do
     node "$CONVERTER" --watch "$SRC" "$DEST" &
     CHILD_PID=$!
     wait "$CHILD_PID" || true
-    echo "[run] Converter exited; restarting in 2s..." >&2
+    log_run "Converter exited; restarting in 2s..." >&2
     sleep 2
   done
 ) &

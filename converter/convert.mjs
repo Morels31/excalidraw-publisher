@@ -140,7 +140,7 @@ const sweepSeconds = (() => {
   if (raw === '') return 3600;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    console.warn(`${LOG_PREFIX} Ignoring invalid SWEEP_INTERVAL "${raw}".`);
+    logWarn(`Ignoring invalid SWEEP_INTERVAL "${raw}".`);
     return 3600;
   }
   return Math.floor(parsed);
@@ -155,7 +155,7 @@ for (const arg of rawArgs) {
   } else if (arg === '--sweep') {
     // Default behaviour; accepted for explicitness.
   } else if (arg.startsWith('--')) {
-    console.warn(`${LOG_PREFIX} Ignoring unknown flag: ${arg}`);
+    logWarn(`Ignoring unknown flag: ${arg}`);
   } else {
     positionalArgs.push(arg);
   }
@@ -198,8 +198,36 @@ let DEST_REAL = null;
 // Small utilities
 // ---------------------------------------------------------------------------
 
+function formatTimestamp(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
+function logPrefix() {
+  return `[${formatTimestamp()}] ${LOG_PREFIX}`;
+}
+
 function log(message) {
-  console.log(`${LOG_PREFIX} ${message}`);
+  console.log(`${logPrefix()} ${message}`);
+}
+
+function logWarn(message) {
+  console.warn(`${logPrefix()} ${message}`);
+}
+
+function logError(message, ...args) {
+  console.error(`${logPrefix()} ${message}`, ...args);
+}
+
+function formatDuration(ms) {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = ((ms % 60_000) / 1000).toFixed(1);
+  return `${minutes}m ${seconds}s`;
 }
 
 function toKey(relPath) {
@@ -646,11 +674,8 @@ function renderPdfPage(pdfFile, page) {
     try {
       fs.unlinkSync(`${tmpPrefix}.jpg`);
     } catch {}
-    console.error(
-      `${LOG_PREFIX} Cannot render page ${page} of ${path.relative(
-        SRC_DIR,
-        pdfFile,
-      )}: ${err.message}`,
+    logError(
+      `Cannot render page ${page} of ${path.relative(SRC_DIR, pdfFile)}: ${err.message}`,
     );
     return null;
   }
@@ -1055,8 +1080,8 @@ function replaceFreedrawPaths(svg, elements, getStroke, dark) {
   }
 
   if (unmatched > 0) {
-    console.warn(
-      `${LOG_PREFIX} ${unmatched} freedraw path(s) had no matching exported ` +
+    logWarn(
+      `${unmatched} freedraw path(s) had no matching exported ` +
         'outline; they keep the default pen shape.',
     );
   }
@@ -1133,7 +1158,7 @@ function saveState(force = false) {
     writeAtomic(STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
     stateDirty = false;
   } catch (err) {
-    console.error(`${LOG_PREFIX} Could not write state file: ${err.message}`);
+    logError(`Could not write state file: ${err.message}`);
   }
 }
 
@@ -1239,7 +1264,7 @@ async function convertOne(srcFile, force = false) {
     try {
       content = fs.readFileSync(srcFile, 'utf8');
     } catch (err) {
-      console.error(`${LOG_PREFIX} Cannot read ${relPath}: ${err.message}`);
+      logError(`Cannot read ${relPath}: ${err.message}`);
       return 'skipped';
     }
 
@@ -1280,9 +1305,7 @@ async function convertOne(srcFile, force = false) {
         markStateDirty();
         return 'converted';
       } catch (err) {
-        console.error(
-          `${LOG_PREFIX} Error rendering ${relPath}: ${err.message}`,
-        );
+        logError(`Error rendering ${relPath}: ${err.message}`);
         writeAtomic(path.join(DEST_DIR, mdRel), content);
         if (!sourceExists(svgRel)) {
           safeUnlink(path.join(DEST_DIR, svgRel));
@@ -1378,8 +1401,8 @@ async function unpublish(relPath) {
       (output) => output === relPath || output === normalizeMdRel(relPath),
     );
     if (!owned) {
-      console.error(
-        `${LOG_PREFIX} Refusing to unpublish ${relPath}: state belongs to ` +
+      logError(
+        `Refusing to unpublish ${relPath}: state belongs to ` +
           `${entry.outputs[0]} (names differ only by case).`,
       );
       return;
@@ -1453,7 +1476,7 @@ function pruneOrphans(sourceFiles) {
 
   const destWalk = walkDirectory(DEST_DIR);
   for (const error of destWalk.errors) {
-    console.error(`${LOG_PREFIX} Could not inspect destination: ${error}`);
+    logError(`Could not inspect destination: ${error}`);
   }
 
   let pruned = 0;
@@ -1562,6 +1585,7 @@ ${intro}${existing.slice(legacyPrefix.length)}`);
 }
 
 async function runSweep(force = false) {
+  const startedAt = performance.now();
   const { files, dirs, errors } = walkDirectory(SRC_DIR);
   assertSourceReady(files, errors);
   assertNoCaseCollisions(files, dirs);
@@ -1586,8 +1610,8 @@ async function runSweep(force = false) {
       else skipped += 1;
     } catch (err) {
       failed += 1;
-      console.error(
-        `${LOG_PREFIX} Failed to process ${path.relative(SRC_DIR, file)}: ${err.message}`,
+      logError(
+        `Failed to process ${path.relative(SRC_DIR, file)}: ${err.message}`,
       );
     }
   }
@@ -1600,14 +1624,15 @@ async function runSweep(force = false) {
     assertSourceReady(after.files, after.errors);
     pruneOrphans(after.files);
   } catch (err) {
-    console.error(`${LOG_PREFIX} Skipping prune: ${err.message}`);
+    logError(`Skipping prune: ${err.message}`);
   }
 
   ensureRootIndex();
   saveState(true);
 
+  const elapsed = formatDuration(performance.now() - startedAt);
   log(
-    `Sweep complete: ${converted} converted, ${cached} cached, ` +
+    `Sweep complete in ${elapsed}: ${converted} converted, ${cached} cached, ` +
       `${skipped} skipped, ${failed} failed.`,
   );
 }
@@ -1626,7 +1651,7 @@ function enqueue(key, task) {
   const next = previous
     .then(task, task)
     .catch((err) => {
-      console.error(`${LOG_PREFIX} Watch task failed for ${key}: ${err.message}`);
+      logError(`Watch task failed for ${key}: ${err.message}`);
     })
     .finally(() => {
       if (queues.get(key) === next) queues.delete(key);
@@ -1700,8 +1725,8 @@ async function startWatcher() {
       if (event === 'add') {
         const twin = caseTwin(relPath);
         if (twin) {
-          console.error(
-            `${LOG_PREFIX} Refusing to convert ${relPath}: name differs ` +
+          logError(
+            `Refusing to convert ${relPath}: name differs ` +
               `only by case from ${twin}. Rename or delete one.`,
           );
           return;
@@ -1727,7 +1752,7 @@ async function startWatcher() {
     });
   });
   watcher.on('error', async (err) => {
-    console.error(`${LOG_PREFIX} Watcher error: ${err.message}`);
+    logError(`Watcher error: ${err.message}`);
     try {
       await watcher.close();
     } catch {}
@@ -1741,7 +1766,7 @@ async function startWatcher() {
     try {
       await runSweep();
     } catch (err) {
-      console.error(`${LOG_PREFIX} Reconcile sweep failed: ${err.message}`);
+      logError(`Reconcile sweep failed: ${err.message}`);
     }
     startSweepTimer();
     log('Watcher ready.');
@@ -1774,7 +1799,7 @@ function startSweepTimer() {
       try {
         await runSweep();
       } catch (err) {
-        console.error(`${LOG_PREFIX} Periodic sweep failed: ${err.message}`);
+        logError(`Periodic sweep failed: ${err.message}`);
       } finally {
         scheduleNext();
       }
@@ -1809,12 +1834,12 @@ process.on('SIGINT', () => {
   void shutdown('SIGINT');
 });
 process.on('uncaughtException', (err) => {
-  console.error(`${LOG_PREFIX} Uncaught exception:`, err);
+  logError('Uncaught exception:', err);
   saveState();
   process.exit(1);
 });
 process.on('unhandledRejection', (err) => {
-  console.error(`${LOG_PREFIX} Unhandled rejection:`, err);
+  logError('Unhandled rejection:', err);
   saveState();
   process.exit(1);
 });
@@ -1850,7 +1875,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`${LOG_PREFIX} Fatal error:`, err);
+  logError('Fatal error:', err);
   saveState();
   process.exit(1);
 });
