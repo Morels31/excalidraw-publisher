@@ -16,6 +16,7 @@ services:
       # vault comes from a network or FUSE-backed share. A periodic sweep
       # picks them up; 0 disables it.
       - SWEEP_INTERVAL=${SWEEP_INTERVAL:-3600}
+      - TZ=${TZ:-UTC}
     security_opt:
       - no-new-privileges:true
     cap_drop:
