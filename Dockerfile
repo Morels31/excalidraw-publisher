@@ -9,26 +9,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tini poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# The converter has its own locked dependency tree so it cannot disturb the
-# Quartz application's node_modules.
-WORKDIR /opt/converter
-COPY converter/package.json converter/package-lock.json ./
-RUN npm ci --omit=dev \
-    && npm cache clean --force
-
-COPY converter/convert.mjs converter/supervisor.mjs ./
-
-WORKDIR /usr/src/app
-
-# Quartz 5 reads quartz.config.yaml; quartz.ts injects BASE_URL at runtime.
-COPY quartz.config.yaml quartz.ts ./
-COPY custom.scss /usr/src/app/quartz/styles/custom.scss
-COPY run.sh ./run.sh
-RUN chmod +x /usr/src/app/run.sh
-
-# Writable runtime directories, owned by the unprivileged app user. The base
-# image ships sample content, so content/ is reset; the build caches are
-# recreated empty.
+# Writable runtime directories, owned by the unprivileged app user. Placed
+# before copying app/converter code so editing our files never re-runs
+# `chown -R` over Quartz's node_modules. The base image ships sample content,
+# so content/ is reset; the build caches are recreated empty.
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app \
     && rm -rf \
@@ -42,6 +26,22 @@ RUN groupadd --gid 10001 app \
         /usr/src/app/.quartz-cache \
         /usr/src/app/quartz/.quartz-cache \
     && chown -R app:app /usr/src/app
+
+# The converter has its own locked dependency tree so it cannot disturb the
+# Quartz application's node_modules.
+WORKDIR /opt/converter
+COPY converter/package.json converter/package-lock.json ./
+RUN npm ci --omit=dev \
+    && npm cache clean --force
+
+COPY converter/convert.mjs converter/supervisor.mjs ./
+
+WORKDIR /usr/src/app
+
+# Quartz 5 reads quartz.config.yaml; quartz.ts injects BASE_URL at runtime.
+COPY --chown=app:app quartz.config.yaml quartz.ts ./
+COPY --chown=app:app custom.scss /usr/src/app/quartz/styles/custom.scss
+COPY --chown=app:app --chmod=755 run.sh ./run.sh
 
 ENV HOME=/tmp \
     NODE_ENV=production
