@@ -376,18 +376,34 @@ function walkDirectory(root) {
     dirs.push(dir);
     let entries;
     try {
-      entries = fs.readdirSync(dir);
+      entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (err) {
       errors.push(`${dir}: ${err.message}`);
       return;
     }
 
-    for (const name of entries) {
-      const full = path.join(dir, name);
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
       const rel = path.relative(root, full);
 
       if (isExcludedRel(rel)) continue;
 
+      if (entry.isSymbolicLink()) {
+        log(`Skipping symlink: ${path.relative(SRC_DIR, full)}`);
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        visit(full);
+        continue;
+      }
+
+      if (entry.isFile()) {
+        files.push(full);
+        continue;
+      }
+
+      // Fallback for filesystems where d_type is DT_UNKNOWN or special nodes.
       let stat;
       try {
         stat = fs.lstatSync(full);
@@ -426,16 +442,28 @@ function walkDirectory(root) {
   return { files, dirs, errors };
 }
 
-function isSafeSourceFile(file) {
-  if (!SRC_REAL) return false;
+/**
+ * Cheap change detector and safety guard combined in a single `lstatSync`.
+ * Watcher paths also verify `realpathSync` containment; `runSweep` paths come
+ * from `walkDirectory` which already rejected symlinks up the tree.
+ */
+function sourceSignature(file, verifyRealpath = true) {
+  if (!SRC_REAL) return null;
   try {
     const stat = fs.lstatSync(file);
-    if (!stat.isFile()) return false;
-    const real = fs.realpathSync(file);
-    return isInside(SRC_REAL, real);
+    if (!stat.isFile()) return null;
+    if (verifyRealpath) {
+      const real = fs.realpathSync(file);
+      if (!isInside(SRC_REAL, real)) return null;
+    }
+    return { size: stat.size, mtimeMs: stat.mtimeMs };
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isSafeSourceFile(file) {
+  return sourceSignature(file, true) !== null;
 }
 
 /**
@@ -518,21 +546,6 @@ function allOutputsExist(outputs) {
       return false;
     }
   });
-}
-
-/**
- * Cheap change detector: size plus mtime, without reading the file. Editing a
- * file updates its mtime, so an unchanged signature means the cached hash is
- * still valid and the file never has to be read at all.
- */
-function fileSignature(file) {
-  try {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile()) return null;
-    return { size: stat.size, mtimeMs: stat.mtimeMs };
-  } catch {
-    return null;
-  }
 }
 
 function signatureUnchanged(entry, sig) {
@@ -1219,7 +1232,7 @@ function assertNoCaseCollisions(files, dirs) {
   );
 }
 
-async function convertOne(srcFile, force = false) {
+async function convertOne(srcFile, force = false, verified = false) {
   const relPath = path.relative(SRC_DIR, srcFile);
   if (!relPath || relPath === '' || relPath.startsWith('..') || path.isAbsolute(relPath)) {
     return 'skipped';
@@ -1230,7 +1243,8 @@ async function convertOne(srcFile, force = false) {
     return 'skipped';
   }
 
-  if (!isSafeSourceFile(srcFile)) {
+  const sig = sourceSignature(srcFile, !verified);
+  if (!sig) {
     log(`Skipping unsafe source path: ${relPath}`);
     return 'skipped';
   }
@@ -1242,7 +1256,6 @@ async function convertOne(srcFile, force = false) {
     const mdRel = normalizeMdRel(relPath);
     const svgRel = svgRelFor(mdRel);
     const previous = state.files[key];
-    const sig = fileSignature(srcFile);
     // A drawing note has two outputs, a plain note one. Accept either shape as
     // long as it matches the current file name, so the note never has to be
     // read on the fast path.
@@ -1352,7 +1365,6 @@ async function convertOne(srcFile, force = false) {
     }
 
     const previous = state.files[key];
-    const sig = fileSignature(srcFile);
     if (
       !force &&
       signatureUnchanged(previous, sig) &&
@@ -1603,8 +1615,17 @@ async function runSweep(force = false) {
   let failed = 0;
 
   for (const file of files) {
+    const ext = path.extname(file).toLowerCase();
+    if (ext !== '.md' && !ALLOWED_ASSET_EXTS.has(ext)) {
+      const key = toKey(path.relative(SRC_DIR, file));
+      if (!state.files[key]) {
+        skipped += 1;
+        continue;
+      }
+    }
+
     try {
-      const result = await convertQueued(file, force);
+      const result = await convertQueued(file, force, true);
       if (result === 'converted') converted += 1;
       else if (result === 'cached') cached += 1;
       else skipped += 1;
@@ -1666,13 +1687,13 @@ function enqueue(key, task) {
  * sweep either runs before a pending event (which then re-reads) or after the
  * running conversion, never in the middle of it.
  */
-async function convertQueued(srcFile, force) {
+async function convertQueued(srcFile, force, verified = false) {
   const key = toKey(path.relative(SRC_DIR, srcFile));
   let outcome = 'skipped';
   let failure = null;
   await enqueue(key, async () => {
     try {
-      outcome = await convertOne(srcFile, force);
+      outcome = await convertOne(srcFile, force, verified);
     } catch (err) {
       failure = err;
     }
