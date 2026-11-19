@@ -24,7 +24,7 @@ import LZString from 'lz-string';
 
 // Bumped whenever converted output changes: loadState() drops the whole
 // manifest on a mismatch, which forces a full rebuild.
-const CONVERTER_VERSION = '2.2.1';
+const CONVERTER_VERSION = '2.3.0';
 const LOG_PREFIX = '[Converter]';
 
 // ---------------------------------------------------------------------------
@@ -650,9 +650,11 @@ const PDF_RENDER_QUALITY = 80;
  * and note edits do not rasterize the same page again.
  */
 function renderPdfPage(pdfFile, page) {
+  const pdfSig = sourceSignature(pdfFile, false);
+  const sigPart = pdfSig ? `${pdfSig.size}:${pdfSig.mtimeMs}` : '';
   const cacheKey = `${crypto
     .createHash('sha1')
-    .update(`${pdfFile}:${page}:${PDF_RENDER_DPI}:${PDF_RENDER_QUALITY}`)
+    .update(`${pdfFile}:${page}:${PDF_RENDER_DPI}:${PDF_RENDER_QUALITY}:${sigPart}`)
     .digest('hex')}.jpg`;
   const cacheFile = path.join(PDF_CACHE_DIR, cacheKey);
 
@@ -694,6 +696,17 @@ function renderPdfPage(pdfFile, page) {
   }
 }
 
+function depsUnchanged(deps) {
+  if (!Array.isArray(deps)) return false;
+  for (const dep of deps) {
+    const sig = sourceSignature(path.join(SRC_DIR, dep.rel), false);
+    if (!sig || sig.size !== dep.size || sig.mtimeMs !== dep.mtimeMs) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Excalidraw notes keep image data outside the drawing JSON: the
  * `## Embedded Files` section maps each element's `fileId` to a vault path.
@@ -703,10 +716,11 @@ function renderPdfPage(pdfFile, page) {
  */
 function resolveEmbeddedFiles(data, relPath, content) {
   const files = { ...(data.files || {}) };
+  const depsByKey = new Map();
   const section = extractSection(content, 'Embedded Files');
   const noteDir = path.dirname(path.join(SRC_DIR, relPath));
 
-  if (!section) return files;
+  if (!section) return { files, deps: [] };
 
   for (const line of section.split(/\r?\n/)) {
     const match = /^([0-9a-f]{40}):\s*\[\[([^\]|]+)/i.exec(line.trim());
@@ -725,10 +739,18 @@ function resolveEmbeddedFiles(data, relPath, content) {
     if (!source) continue;
 
     const ext = path.extname(source).toLowerCase();
+    const recordDep = () => {
+      const depRel = path.relative(SRC_DIR, source);
+      const depKey = toKey(depRel);
+      if (depsByKey.has(depKey)) return;
+      const sig = sourceSignature(source, false);
+      if (sig) depsByKey.set(depKey, { rel: depRel, size: sig.size, mtimeMs: sig.mtimeMs });
+    };
 
     if (ext === '.pdf') {
       const page = Number(/[#&]page=(\d+)/.exec(link)?.[1] || 0);
       if (page < 1) continue;
+      recordDep();
       const jpeg = renderPdfPage(source, page);
       if (!jpeg) continue;
       files[id] = {
@@ -742,6 +764,7 @@ function resolveEmbeddedFiles(data, relPath, content) {
 
     const mimeType = IMAGE_MIME_TYPES.get(ext);
     if (!mimeType) continue;
+    recordDep();
 
     try {
       files[id] = {
@@ -753,7 +776,7 @@ function resolveEmbeddedFiles(data, relPath, content) {
     } catch {}
   }
 
-  return files;
+  return { files, deps: [...depsByKey.values()] };
 }
 
 function buildCompanionMarkdown(relPath, content) {
@@ -1268,7 +1291,8 @@ async function convertOne(srcFile, force = false, verified = false) {
       !force &&
       signatureUnchanged(previous, sig) &&
       knownOutputs &&
-      outputsIntact(previous)
+      outputsIntact(previous) &&
+      (previous.kind !== 'drawing' || depsUnchanged(previous.deps))
     ) {
       return 'cached';
     }
@@ -1288,13 +1312,13 @@ async function convertOne(srcFile, force = false, verified = false) {
     const parsedOutputs = drawing ? [mdRel, svgRel] : [mdRel];
 
     // Same bytes and same classification (touch, rsync -t): keep the existing
-    // output and just refresh the signature. The embedded images cannot have
-    // changed if the note itself did not.
+    // output and just refresh the signature—unless an embedded file changed.
     if (
       previous &&
       previous.hash === hash &&
       sameOutputs(previous.outputs, parsedOutputs) &&
-      outputsIntact(previous)
+      outputsIntact(previous) &&
+      (!drawing || depsUnchanged(previous.deps))
     ) {
       state.files[key] = withSignature(previous, sig);
       markStateDirty();
@@ -1303,16 +1327,17 @@ async function convertOne(srcFile, force = false, verified = false) {
 
     if (drawing) {
       try {
+        const { files, deps } = resolveEmbeddedFiles(drawing, relPath, content);
         await renderDrawing({
           relPath,
           content,
           mdRel,
           svgRel,
           data: drawing,
-          files: resolveEmbeddedFiles(drawing, relPath, content),
+          files,
         });
         state.files[key] = withSignature(
-          { hash, kind: 'drawing', outputs: parsedOutputs },
+          { hash, kind: 'drawing', outputs: parsedOutputs, deps },
           sig,
         );
         markStateDirty();
@@ -1728,6 +1753,27 @@ function caseTwin(relPath) {
   return null;
 }
 
+function requeueDependentDrawings(relPath, isDir = false) {
+  const targetKey = toKey(relPath);
+  const matches = (depRel) => {
+    const depKey = toKey(depRel);
+    return isDir ? depKey.startsWith(`${targetKey}/`) : depKey === targetKey;
+  };
+
+  for (const [entryKey, entry] of Object.entries(state.files)) {
+    if (entry?.kind !== 'drawing' || !Array.isArray(entry.deps)) continue;
+    if (!entry.deps.some((dep) => matches(dep.rel))) continue;
+
+    const mdPath = findSourcePath(entryKey);
+    if (!mdPath) continue;
+    const mdRel = path.relative(SRC_DIR, mdPath);
+    enqueue(entryKey, async () => {
+      log(`[dep-change] Re-rendering ${mdRel} (dependency ${relPath} updated)`);
+      await convertOne(mdPath);
+    });
+  }
+}
+
 async function startWatcher() {
   const { watch } = await import('chokidar');
 
@@ -1766,6 +1812,9 @@ async function startWatcher() {
       } else {
         await convertOne(filePath);
       }
+      if (path.extname(relPath).toLowerCase() !== '.md') {
+        requeueDependentDrawings(relPath);
+      }
     });
   };
 
@@ -1777,6 +1826,7 @@ async function startWatcher() {
     enqueue(toKey(relPath), async () => {
       log(`[unlinkDir] ${relPath}`);
       await unpublishDir(relPath);
+      requeueDependentDrawings(relPath, true);
     });
   });
   watcher.on('error', async (err) => {
